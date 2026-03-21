@@ -15,18 +15,21 @@ description: Use when user describes a workflow they want to automate and needs 
 
 ## Phase 1: Requirement Clarification
 
-Before writing any code, ask the user these questions (combine into one message, only ask what's not already clear):
+**Use the `/brainstorming` skill** to explore the user's requirements before writing any code.
 
 ```
-1. 目标输出是什么？(文件/终端输出/API 调用/数据库写入？)
-2. 数据来源是什么？(本地文件/Web 搜索/API/用户输入？)
-3. 哪些步骤需要 LLM？哪些是纯 Python/Shell 可以完成的？
-4. 输出格式有要求吗？(Markdown/JSON/特定结构？)
-5. 是否需要定时运行？(cron 表达式？)
-6. 错误处理预期？(遇到失败是重试/跳过/报警？)
+/brainstorming
 ```
 
-**When to proceed without asking:** If the user's description already answers most questions (e.g., "研究 X 然后生成 Markdown 报告"), state your assumptions explicitly and proceed to Phase 2.
+Let brainstorming drive the conversation. The goal is to surface:
+- 目标输出（文件 / Telegram / API 调用 / 数据库？）
+- 数据来源（本地 / Web 搜索 / 第三方 API？）
+- 哪些步骤需要 LLM，哪些纯 Python 可以完成
+- 输出格式要求
+- 是否定时运行（cron？）
+- 错误处理预期
+
+**When to skip brainstorming:** If the user's message already answers all of the above (e.g., "研究 X 然后生成 Markdown 报告"), state your assumptions and proceed directly to Phase 2.
 
 ---
 
@@ -229,35 +232,51 @@ if __name__ == "__main__":
 
 ### Testing Protocol
 
-**Step 1 — Always run static checks first:**
+**Step 1 — Static checks (always):**
 ```bash
-# Syntax check
-python -c "import ast; ast.parse(open('examples/script.py').read()); print('syntax OK')"
-# Import check
-python -c "import examples.script_name; print('imports OK')"
-# --help
-python examples/script.py --help
+uv run python -c "import ast; ast.parse(open('examples/script.py').read()); print('syntax OK')"
+uv run python -c "import examples.script_name; print('imports OK')"
+uv run python examples/script.py --help
+```
+Fix any error before proceeding.
+
+**Step 2 — End-to-end run:**
+
+**Has placeholder tasks** → skip e2e. Deliver pipeline skeleton + interface specs. Done.
+
+**No placeholder tasks** → run end-to-end:
+- If contains LLMTask: inform user *"完整运行会调用 Claude CLI（消耗 tokens）"*, then proceed.
+
+```bash
+uv run python examples/script.py "test_input" [--output /tmp/harness_test]
 ```
 
-**Step 2 — End-to-end run (based on pipeline content):**
+**Step 3 — Debug loop (repeat until pipeline succeeds):**
 
-**No placeholder tasks + no LLMTask** → run immediately, verify output:
-```bash
-python examples/script.py "test_input" --output /tmp/harness_test
-ls -la /tmp/harness_test/ && head -20 /tmp/harness_test/*
+When a run fails, immediately:
+1. Identify **which task failed** (task index + name)
+2. Report the **exact error** to the user:
+   ```
+   ❌ Task 1 [fetch_market_heat] 失败
+   错误：ModuleNotFoundError: No module named 'akshare'
+   修复：uv add akshare
+   ```
+3. Fix the issue and re-run
+4. Repeat until all tasks complete successfully
+
+**Step 4 — Completion criteria:**
+
+Pipeline is **done only when it runs successfully end-to-end at least once.**
+
+On success, report task status:
 ```
-
-**No placeholder tasks + has LLMTask** → inform user of token cost, then run:
-> "静态检查通过。完整运行会调用 Claude CLI（消耗 tokens），现在执行：`python examples/script.py <arg>`"
-
-Run it, verify each task's output is non-empty and the final file is saved correctly.
-
-**Has placeholder tasks** → skip end-to-end. Deliver instead:
-1. Pipeline skeleton with `NotImplementedError` placeholders
-2. Interface spec for each placeholder (function signature, expected input/output, suggested library)
-3. Note: *"以下 task 需要先实现后才能运行：[list]"*
-
-**Fix and re-check until all runnable steps pass.**
+✅ Pipeline 成功
+Run ID: abc12345
+Task 0 [fetch_market_heat]  ✅  1.2s
+Task 1 [LLM 分析热点]       ✅  18.4s  (tokens: 1,203)
+Task 2 [send_telegram]      ✅  0.3s
+总耗时：19.9s
+```
 
 ---
 
