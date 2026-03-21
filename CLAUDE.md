@@ -143,8 +143,8 @@ pytest tests/ --cov=harness --cov-report=term-missing
 ## 示例
 
 ```bash
-python examples/code_stats.py               # 统计代码量（FunctionTask + LLMTask + ShellTask）
-python examples/analyze_harness.py          # 分析 → 优化 → 复盘（三阶段 pipeline）
-python examples/research_report.py Clawith  # 联网调研报告（多 LLMTask + FunctionTask）
-python examples/video_pipeline.py           # LLMTask + Parallel[PollingTask×2] + FunctionTask
+uv run python examples/code_stats/main.py               # 统计代码量（FunctionTask + LLMTask + ShellTask）
+uv run python examples/analyze_harness/main.py          # 分析 → 优化 → 复盘（三阶段 pipeline）
+uv run python examples/research_report/main.py Clawith  # 联网调研报告（多 LLMTask + FunctionTask）
+uv run python examples/video_pipeline/main.py           # LLMTask + Parallel[PollingTask×2] + FunctionTask
 ```
