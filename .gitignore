@@ -11,3 +11,4 @@ build/
 htmlcov/
 .DS_Store
 .harness/
+reports/

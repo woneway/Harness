@@ -2,8 +2,8 @@
 
 > 通用自动化流水线框架，内置 Claude Code runner
 
-**状态：设计已确认**
-**日期：2026-03-21（定位升级修订：2026-03-21；架构审查修订：2026-03-21）**
+**状态：v1 已实现**（122 tests pass，2026-03-21）
+**设计确认日期：2026-03-21**
 
 ---
 
@@ -701,36 +701,8 @@ await h.start()
 
 ---
 
-## 十五、待实现清单
+## 十五、实现状态（v1 已完成）
 
-**_internal/**
-- [ ] `exceptions.py`：TaskFailedError, ClaudeNotFoundError, InvalidPipelineError, ...
-- [ ] `stream_parser.py`：stream-json 逐行解析
-- [ ] `session.py`：SessionManager
-- [ ] `executor.py`：Task 类型派发 + 重试 + session 管理 + prompt 注入兜底
-- [ ] `parallel.py`：Parallel 执行（asyncio.gather + error_policy）
-- [ ] `polling.py`：PollingTask 轮询循环
+所有模块已实现，122 tests pass。详细实现记录见 `design/PLAN.md`（历史存档）。
 
-**runners/**
-- [ ] `base.py`：AbstractRunner
-- [ ] `claude_cli.py`：ClaudeCliRunner（asyncio subprocess + 版本检查）
-- [ ] `agent_leader.py`：AgentLeader
-
-**storage/**
-- [ ] `models.py`：runs + task_logs 表（含 task_type 字段）
-- [ ] `sql.py`：SQLAlchemy async 实现 + WAL 初始化
-
-**核心层**
-- [ ] `task.py`：LLMTask, FunctionTask, ShellTask, PollingTask, Parallel, TaskConfig, Result, PipelineResult（task_index 为 str）
-- [ ] `memory.py`：Memory + 注入逻辑
-- [ ] `harness.py`：Harness 主类
-
-**基础设施**
-- [ ] `scheduler/apscheduler.py`：APScheduler v4
-- [ ] `notifier/telegram.py`：Telegram 通知
-- [ ] `cli.py`：harness migrate / harness runs
-
-**验证**
-- [ ] 基础测试套件
-- [ ] IterationForge 集成验证
-- [ ] 视频生成管道示例（LLMTask + PollingTask + Parallel + FunctionTask）
+**已实现：** `_internal/`（exceptions, stream_parser, session, executor, parallel, polling）、`runners/`（base, claude_cli, agent_leader）、`storage/`（models, sql）、`task.py`、`memory.py`、`harness.py`、`scheduler/`、`notifier/`、`cli.py`
