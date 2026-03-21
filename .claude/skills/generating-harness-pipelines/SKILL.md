@@ -102,6 +102,34 @@ If requirements are clear, proceed immediately after stating the design. Only wa
 
 ## Phase 3: Generate + Test
 
+### Responsibility Boundary
+
+`generating-harness-pipelines` is an **orchestration skill**, not a full-stack development skill.
+
+**This skill handles:**
+- Pipeline structure: task order, data flow, prompt logic
+- LLMTask: write the full prompt
+- Simple FunctionTask (≤50 lines): implement directly — file I/O, API calls, data formatting
+- Complex FunctionTask (>50 lines / requires independent design): output interface spec + `raise NotImplementedError` placeholder
+
+**This skill does NOT handle:**
+- Implementing new sub-systems (backtest engines, video renderers, data pipelines)
+- Testing the internals of placeholder tasks
+
+**When a FunctionTask needs a placeholder:**
+```python
+def fetch_data(results: list):
+    """TODO: implement
+    Input: none (first task)
+    Output: pd.DataFrame with columns [date, open, high, low, close, volume]
+    Suggested lib: akshare.stock_zh_a_hist(symbol, period='daily', adjust='qfq')
+    """
+    raise NotImplementedError("fetch_data: see docstring for spec")
+```
+Output a clear interface design alongside the pipeline skeleton so the implementer knows exactly what to build.
+
+---
+
 ### Code Structure (complete, runnable template)
 
 ```python
@@ -201,32 +229,35 @@ if __name__ == "__main__":
 
 ### Testing Protocol
 
-**Distinguish by pipeline type before running:**
-
-**Pipeline contains only FunctionTask / ShellTask** → run full end-to-end immediately:
+**Step 1 — Always run static checks first:**
 ```bash
-# 1. Syntax check
+# Syntax check
 python -c "import ast; ast.parse(open('examples/script.py').read()); print('syntax OK')"
-# 2. --help
+# Import check
+python -c "import examples.script_name; print('imports OK')"
+# --help
 python examples/script.py --help
-# 3. End-to-end run (safe, no LLM cost)
+```
+
+**Step 2 — End-to-end run (based on pipeline content):**
+
+**No placeholder tasks + no LLMTask** → run immediately, verify output:
+```bash
 python examples/script.py "test_input" --output /tmp/harness_test
-# 4. Verify output
 ls -la /tmp/harness_test/ && head -20 /tmp/harness_test/*
 ```
 
-**Pipeline contains LLMTask** → syntax + import check only, then inform user:
-```bash
-# 1. Syntax check
-python -c "import ast; ast.parse(open('examples/script.py').read()); print('syntax OK')"
-# 2. Import check (catches missing dependencies without invoking Claude CLI)
-python -c "import examples.script_name; print('imports OK')"
-# 3. --help
-python examples/script.py --help
-```
-Then tell the user: *"语法和导入检查通过。完整运行会调用 Claude CLI（消耗 tokens），请确认后执行：`python examples/script.py <arg>`"*
+**No placeholder tasks + has LLMTask** → inform user of token cost, then run:
+> "静态检查通过。完整运行会调用 Claude CLI（消耗 tokens），现在执行：`python examples/script.py <arg>`"
 
-**Fix and re-check until all steps pass.**
+Run it, verify each task's output is non-empty and the final file is saved correctly.
+
+**Has placeholder tasks** → skip end-to-end. Deliver instead:
+1. Pipeline skeleton with `NotImplementedError` placeholders
+2. Interface spec for each placeholder (function signature, expected input/output, suggested library)
+3. Note: *"以下 task 需要先实现后才能运行：[list]"*
+
+**Fix and re-check until all runnable steps pass.**
 
 ---
 
@@ -294,7 +325,8 @@ return f"""请使用 WebSearch 工具搜索「{topic}」，至少进行 4 次查
 | `make_save_fn` called but not defined | Always include it in the file if used |
 | `lambda results: results[1].output` in Task 1 | Task 1 only sees `results[0]` |
 | `prompt=lambda results: f"...{x}"` in loop | Use closure to capture `x` |
-| Running end-to-end for LLMTask pipeline without warning | Inform user: will invoke Claude CLI and cost tokens |
+| Implementing a complex sub-system inside this skill | Use `NotImplementedError` placeholder + interface spec |
+| Running end-to-end when there are placeholder tasks | Skip e2e, deliver skeleton + spec instead |
 | Not using `output_schema` when next task needs specific fields | Add `output_schema=SomeModel`; access `.field` not raw string |
 | Heavy processing in LLMTask | Move to FunctionTask (deterministic = no LLM needed) |
 | `Task(...)` | Use `LLMTask(...)` — `Task` is deprecated |
