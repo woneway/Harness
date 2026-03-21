@@ -133,10 +133,49 @@ Output a clear interface design alongside the pipeline skeleton so the implement
 
 ---
 
+### Output Structure
+
+Each pipeline is a **folder** under `examples/`:
+
+```
+examples/pipeline_name/
+  main.py       # pipeline script
+  README.md     # setup + runnable examples
+```
+
+**README.md template:**
+```markdown
+# Pipeline Name — 一句话描述
+
+## 环境要求
+- 依赖：`uv add <package>`
+- 环境变量：`export FOO=...`
+
+## 运行
+
+\```bash
+# 测试运行（一次）
+uv run python examples/pipeline_name/main.py --run-once
+
+# 定时运行（如适用）
+uv run python examples/pipeline_name/main.py
+\```
+
+## Pipeline 结构
+
+\```
+FunctionTask [步骤名] — 描述
+    ↓
+LLMTask [步骤名]      — 描述
+    ↓
+FunctionTask [保存]   — 描述
+\```
+```
+
 ### Code Structure (complete, runnable template)
 
 ```python
-"""script_name.py — 一句话描述。
+"""main.py — 一句话描述。
 
 pipeline:
   FunctionTask [步骤名] — 做什么，输出什么
@@ -146,7 +185,7 @@ pipeline:
   FunctionTask [保存]   — 写入文件，返回 Path
 
 运行:
-    python examples/script_name.py <arg> [--output dir]
+    uv run python examples/pipeline_name/main.py <arg> [--output dir]
 """
 from __future__ import annotations
 
