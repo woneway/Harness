@@ -71,6 +71,8 @@ class Harness:
         stream_callback: 接收解析后文本片段的回调（与 raw_stream_callback 互斥）。
         raw_stream_callback: 接收原始 event dict 的回调（与 stream_callback 互斥）。
         default_config: 全局默认 TaskConfig。
+        env_overrides: 运行 FunctionTask/ShellTask 前覆写的环境变量。
+            空字符串值表示清除该变量（如 {'HTTP_PROXY': ''} 清除代理）。
     """
 
     def __init__(
@@ -85,6 +87,7 @@ class Harness:
         stream_callback: Callable[[str], None] | None = None,
         raw_stream_callback: Callable[[dict], None] | None = None,
         default_config: TaskConfig = TaskConfig(),
+        env_overrides: dict[str, str] | None = None,
     ) -> None:
         if stream_callback is not None and raw_stream_callback is not None:
             raise ValueError(
@@ -103,6 +106,7 @@ class Harness:
         self._stream_callback = stream_callback
         self._raw_stream_callback = raw_stream_callback
         self._default_config = default_config
+        self._env_overrides: dict[str, str] = env_overrides or {}
 
         self._storage: SQLStorage | None = None
         self._scheduler = None
@@ -337,11 +341,13 @@ class Harness:
                     r = await execute_function_task(
                         task, task_index, results, run_id,
                         harness_config=self._default_config,
+                        env_overrides=self._env_overrides,
                     )
                 elif isinstance(task, ShellTask):
                     r = await execute_shell_task(
                         task, task_index, results, run_id,
                         harness_config=self._default_config,
+                        env_overrides=self._env_overrides,
                     )
                 elif isinstance(task, PollingTask):
                     r = await execute_polling(

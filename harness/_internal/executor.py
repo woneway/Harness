@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -183,6 +184,7 @@ async def execute_function_task(
     run_id: str,
     *,
     harness_config: TaskConfig | None,
+    env_overrides: dict[str, str] | None = None,
 ) -> Result:
     """执行单个 FunctionTask。
 
@@ -195,35 +197,52 @@ async def execute_function_task(
     attempt = 0
     last_error = ""
 
-    while attempt <= config.max_retries:
-        try:
-            raw_output = task.fn(results)
-        except OutputSchemaError:
-            raise  # 直接向上抛，不重试
-        except Exception as e:
-            last_error = str(e)
-            attempt += 1
-            if attempt <= config.max_retries:
-                wait = config.backoff_base ** (attempt - 1)
-                await asyncio.sleep(wait)
-            continue
+    _orig_env: dict[str, str | None] = {}
+    if env_overrides:
+        for key, val in env_overrides.items():
+            _orig_env[key] = os.environ.get(key)
+            if val == "":
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
 
-        # output_schema 校验：失败抛 OutputSchemaError，不重试
-        if task.output_schema is not None:
-            if not isinstance(raw_output, task.output_schema):
-                raise OutputSchemaError(task_index, task.output_schema, type(raw_output))
+    try:
+        while attempt <= config.max_retries:
+            try:
+                raw_output = task.fn(results)
+            except OutputSchemaError:
+                raise  # 直接向上抛，不重试
+            except Exception as e:
+                last_error = str(e)
+                attempt += 1
+                if attempt <= config.max_retries:
+                    wait = config.backoff_base ** (attempt - 1)
+                    await asyncio.sleep(wait)
+                continue
 
-        duration = time.monotonic() - start_time
-        return Result(
-            task_index=task_index,
-            task_type="function",
-            output=raw_output,
-            raw_text=None,
-            tokens_used=0,
-            duration_seconds=duration,
-            success=True,
-            error=None,
-        )
+            # output_schema 校验：失败抛 OutputSchemaError，不重试
+            if task.output_schema is not None:
+                if not isinstance(raw_output, task.output_schema):
+                    raise OutputSchemaError(task_index, task.output_schema, type(raw_output))
+
+            duration = time.monotonic() - start_time
+            return Result(
+                task_index=task_index,
+                task_type="function",
+                output=raw_output,
+                raw_text=None,
+                tokens_used=0,
+                duration_seconds=duration,
+                success=True,
+                error=None,
+            )
+    finally:
+        if env_overrides:
+            for key, orig_val in _orig_env.items():
+                if orig_val is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = orig_val
 
     raise TaskFailedError(
         run_id, task_index, "function", last_error, partial_results=list(results)
@@ -237,6 +256,7 @@ async def execute_shell_task(
     run_id: str,
     *,
     harness_config: TaskConfig | None,
+    env_overrides: dict[str, str] | None = None,
 ) -> Result:
     """执行单个 ShellTask，非零退出码触发重试。"""
     _emit_separator(task_index, "shell", task.stream_callback, task.raw_stream_callback)
@@ -252,6 +272,17 @@ async def execute_shell_task(
     except Exception as e:
         raise TaskFailedError(run_id, task_index, "shell", f"cmd callable raised: {e}")
 
+    # 构建子进程环境变量
+    if env_overrides:
+        cmd_env = os.environ.copy() if task.env is None else dict(task.env)
+        for key, val in env_overrides.items():
+            if val == "":
+                cmd_env.pop(key, None)
+            else:
+                cmd_env[key] = val
+    else:
+        cmd_env = task.env  # None means inherit from process
+
     start_time = time.monotonic()
     last_error = ""
     attempt = 0
@@ -264,7 +295,7 @@ async def execute_shell_task(
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=task.cwd,
-                    env=task.env,
+                    env=cmd_env,
                 ),
                 timeout=config.timeout,
             )
