@@ -35,6 +35,37 @@ Let brainstorming drive the conversation. The goal is to surface:
 
 ## Phase 2: Pipeline Design
 
+### 步骤 0：领域调研（按需）
+
+**分解步骤前**，先问自己：*"我了解这个问题的标准解法吗？"*
+
+- **熟悉的域**（如「抓取网页 → 总结 → 保存」）：直接分解，跳过调研。
+- **陌生的域**（如「量化选股」「视频转录流水线」）：先调研，再分解。
+
+**为什么分解依赖调研：** 只有理解领域从业者如何拆解问题，才能设计出正确的 Task 结构。没有调研就贸然分解，容易建出错误的 pipeline 骨架，后期改动成本很高。
+
+**调研流程（迭代，不是顺序）：**
+```
+初步猜测步骤
+    ↓
+WebSearch：开源项目 / 行业工具如何解决这个问题？
+    ↓
+根据调研结果修订分解
+    ↓
+逐步骤调研具体实现（API、库、服务）
+    ↓
+最终结构
+```
+
+**搜索方向：**
+- GitHub 上解决同类问题的开源项目（参考其模块划分）
+- 行业标准工作流或数据处理范式
+- 可用的 Python 库及其函数签名
+
+理解领域的自然结构后，再开始分解。
+
+---
+
 ### Step 1: Map the workflow to Task types
 
 | User's need | Best Task type | Notes |
@@ -394,6 +425,6 @@ return f"""请使用 WebSearch 工具搜索「{topic}」，至少进行 4 次查
 ## Reference
 
 - Harness project: `~/ai/projects/Harness`
-- Working examples: `examples/research_report.py`, `examples/code_stats.py`, `examples/analyze_harness.py`
+- Working examples: `examples/research_report/main.py`, `examples/code_stats/main.py`, `examples/analyze_harness/main.py`
 - Design doc: `design/v1-design.md`
 - View run history: `harness runs` / `harness runs --failed`

@@ -80,6 +80,19 @@ class Memory:
 
         return combined
 
+    def consolidation_system_prompt(self, project_path: Path) -> str:
+        """生成 memory.md 整理提示，注入到末尾 LLMTask 的 system_prompt。
+
+        当末尾 LLMTask 无 output_schema 时，框架自动追加此提示，
+        告知 Claude 在完成主任务后将关键信息写入 memory.md。
+        """
+        memory_path = project_path / self.memory_file
+        return (
+            f"完成主要任务后，请将本次运行中值得记录的关键发现、决策和上下文"
+            f"写入文件 `{memory_path}`。"
+            "若文件不存在则创建，若已存在则追加或整理更新，内容简洁即可。"
+        )
+
     def write_memory_update(
         self,
         project_path: Path,

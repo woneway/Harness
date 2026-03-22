@@ -126,3 +126,22 @@ class TestWriteMemoryUpdate:
         memory = Memory(memory_file=".harness/subdir/memory.md")
         memory.write_memory_update(tmp_path, "hello")
         assert (tmp_path / ".harness" / "subdir" / "memory.md").exists()
+
+
+class TestConsolidationSystemPrompt:
+    def test_contains_memory_file_path(self, tmp_path: Path) -> None:
+        memory = Memory(memory_file=".harness/memory.md")
+        prompt = memory.consolidation_system_prompt(tmp_path)
+        expected_path = str(tmp_path / ".harness" / "memory.md")
+        assert expected_path in prompt
+
+    def test_is_non_empty_string(self, tmp_path: Path) -> None:
+        memory = Memory()
+        prompt = memory.consolidation_system_prompt(tmp_path)
+        assert isinstance(prompt, str)
+        assert len(prompt) > 0
+
+    def test_custom_memory_file_path_reflected(self, tmp_path: Path) -> None:
+        memory = Memory(memory_file=".harness/custom.md")
+        prompt = memory.consolidation_system_prompt(tmp_path)
+        assert "custom.md" in prompt

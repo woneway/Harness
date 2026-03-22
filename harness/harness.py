@@ -239,6 +239,13 @@ class Harness:
                         )
                     )
 
+        # 找到最后一个顶层 LLMTask 的索引，用于 memory consolidation 注入
+        last_llm_index: int | None = None
+        for _i in range(len(tasks) - 1, -1, -1):
+            if isinstance(tasks[_i], LLMTask):
+                last_llm_index = _i
+                break
+
         session_manager = SessionManager()
         if resume_from is not None:
             session_manager.reset()
@@ -304,10 +311,24 @@ class Harness:
                 effective_raw_cb = task.raw_stream_callback or self._raw_stream_callback
 
                 if isinstance(task, LLMTask):
+                    # memory consolidation：末尾 LLMTask 无 schema 时注入整理提示
+                    effective_sp = task.system_prompt
+                    if (
+                        self._memory is not None
+                        and outer_index == last_llm_index
+                        and task.output_schema is None
+                    ):
+                        consolidation = self._memory.consolidation_system_prompt(
+                            self._project_path
+                        )
+                        effective_sp = "\n\n".join(
+                            p for p in [task.system_prompt, consolidation] if p
+                        )
+
                     # 注入回调
                     task_with_cb = LLMTask(
                         prompt=task.prompt,
-                        system_prompt=task.system_prompt,
+                        system_prompt=effective_sp,
                         output_schema=task.output_schema,
                         runner=task.runner,
                         config=task.config,

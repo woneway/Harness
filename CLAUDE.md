@@ -119,7 +119,7 @@ harness/
 ### 设计文档偏差
 
 - `design/v1-design.md` Section 11 写 `--session-id`，实际 Claude CLI 使用 `--resume`（见 `claude_cli.py:131`）
-- memory.md 兜底整理机制（"末尾 LLMTask 无 schema + system_prompt 追加整理提示"）PLAN.md 标了 `[x]` 但代码中**未实现**
+- ~~memory.md 兜底整理机制~~（已实现：`Memory.consolidation_system_prompt()`，末尾 LLMTask 无 schema 时自动注入整理提示）
 
 ### 代码风格
 

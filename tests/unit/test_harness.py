@@ -20,6 +20,17 @@ class MockRunner(AbstractRunner):
         return RunnerResult(text="mock result", tokens_used=5, session_id="s1")
 
 
+class CapturingRunner(AbstractRunner):
+    """记录每次调用时的 system_prompt，用于验证注入逻辑。"""
+
+    def __init__(self) -> None:
+        self.captured: list[str] = []
+
+    async def execute(self, prompt, *, system_prompt, session_id, **kwargs) -> RunnerResult:
+        self.captured.append(system_prompt or "")
+        return RunnerResult(text="ok", tokens_used=5, session_id="s1")
+
+
 def make_harness(tmp_path: Path, **kwargs) -> Harness:
     return Harness(str(tmp_path), runner=MockRunner(), **kwargs)
 
@@ -239,6 +250,95 @@ class TestRunSugar:
 # ---------------------------------------------------------------------------
 # Task 别名（DeprecationWarning）
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# memory.md 整理机制
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryConsolidation:
+    @pytest.mark.asyncio
+    async def test_consolidation_injected_to_last_llm_task(self, tmp_path: Path) -> None:
+        """末尾 LLMTask 无 schema 时，整理提示注入 system_prompt。"""
+        from harness.memory import Memory
+
+        runner = CapturingRunner()
+        h = Harness(str(tmp_path), runner=runner, memory=Memory())
+        await h.pipeline([LLMTask(prompt="do something")])
+
+        assert len(runner.captured) == 1
+        assert str(tmp_path / ".harness" / "memory.md") in runner.captured[0]
+
+    @pytest.mark.asyncio
+    async def test_consolidation_not_injected_when_no_memory(self, tmp_path: Path) -> None:
+        """memory=None 时不注入整理提示。"""
+        runner = CapturingRunner()
+        h = Harness(str(tmp_path), runner=runner, memory=None)
+        await h.pipeline([LLMTask(prompt="do something")])
+
+        # 不应包含 memory.md 路径
+        assert ".harness/memory.md" not in runner.captured[0]
+
+    @pytest.mark.asyncio
+    async def test_consolidation_not_injected_when_output_schema(self, tmp_path: Path) -> None:
+        """末尾 LLMTask 有 output_schema 时不注入整理提示。"""
+        from pydantic import BaseModel
+        from harness.memory import Memory
+
+        class MySchema(BaseModel):
+            value: str
+
+        runner = CapturingRunner()
+        h = Harness(str(tmp_path), runner=runner, memory=Memory())
+        # runner 返回的 text="ok" 不是有效 JSON，会触发 schema 校验失败重试
+        # 改为返回合法 JSON
+        runner2 = CapturingRunner()
+
+        async def _execute(prompt, *, system_prompt, session_id, **kwargs):
+            runner2.captured.append(system_prompt or "")
+            return RunnerResult(text='{"value": "x"}', tokens_used=5, session_id="s1")
+
+        runner2.execute = _execute  # type: ignore[method-assign]
+        h2 = Harness(str(tmp_path), runner=runner2, memory=Memory())
+        await h2.pipeline([LLMTask(prompt="do something", output_schema=MySchema)])
+
+        assert len(runner2.captured) >= 1
+        # 整理提示不应出现在 system_prompt 中
+        assert str(tmp_path / ".harness" / "memory.md") not in runner2.captured[0]
+
+    @pytest.mark.asyncio
+    async def test_consolidation_only_on_last_llm_task(self, tmp_path: Path) -> None:
+        """整理提示只注入最后一个 LLMTask，不影响前面的 LLMTask。"""
+        from harness.memory import Memory
+
+        runner = CapturingRunner()
+        h = Harness(str(tmp_path), runner=runner, memory=Memory())
+        await h.pipeline([
+            LLMTask(prompt="first"),
+            LLMTask(prompt="second"),
+        ])
+
+        assert len(runner.captured) == 2
+        memory_path = str(tmp_path / ".harness" / "memory.md")
+        # 第一个 LLMTask 不注入
+        assert memory_path not in runner.captured[0]
+        # 最后一个 LLMTask 注入
+        assert memory_path in runner.captured[1]
+
+    @pytest.mark.asyncio
+    async def test_consolidation_preserves_existing_task_system_prompt(
+        self, tmp_path: Path
+    ) -> None:
+        """注入整理提示时，task 自身的 system_prompt 保持不变。"""
+        from harness.memory import Memory
+
+        runner = CapturingRunner()
+        h = Harness(str(tmp_path), runner=runner, memory=Memory())
+        await h.pipeline([LLMTask(prompt="hi", system_prompt="you are helpful")])
+
+        assert "you are helpful" in runner.captured[0]
+        assert str(tmp_path / ".harness" / "memory.md") in runner.captured[0]
 
 
 class TestTaskDeprecationInHarness:
