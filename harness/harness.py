@@ -17,6 +17,7 @@ from harness._internal.executor import (
     execute_llm_task,
     execute_shell_task,
 )
+from harness._internal.dialogue import execute_dialogue
 from harness._internal.parallel import execute_parallel
 from harness._internal.polling import execute_polling
 from harness._internal.session import SessionManager
@@ -26,6 +27,7 @@ from harness.runners.base import AbstractRunner
 from harness.runners.claude_cli import ClaudeCliRunner
 from harness.storage.sql import SQLStorage
 from harness.task import (
+    Dialogue,
     FunctionTask,
     LLMTask,
     Parallel,
@@ -402,6 +404,17 @@ class Harness:
                     r = await execute_polling(
                         task, task_index, results, run_id,
                         harness_config=self._default_config,
+                    )
+                elif isinstance(task, Dialogue):
+                    r = await execute_dialogue(
+                        dialogue=task,
+                        outer_index=outer_index,
+                        pipeline_results=results,
+                        run_id=run_id,
+                        harness_system_prompt=self._system_prompt,
+                        harness_runner=self._runner,
+                        harness_config=self._default_config,
+                        storage=self._storage,
                     )
                 else:
                     raise TypeError(f"Unknown task type: {type(task)}")

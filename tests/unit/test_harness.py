@@ -485,3 +485,55 @@ class TestTaskDeprecationInHarness:
 
         result = await h.pipeline([task])
         assert len(result.results) == 1
+
+
+# ---- Dialogue 集成 ----
+
+from harness.task import Dialogue, DialogueOutput, Role
+
+
+class TestHarnessDialogue:
+    @pytest.mark.asyncio
+    async def test_pipeline_with_dialogue_produces_result(
+        self, tmp_path, mock_runner
+    ) -> None:
+        """pipeline 中的 Dialogue 产出单个 Result，output 为 DialogueOutput。"""
+        h = Harness(project_path=str(tmp_path), runner=mock_runner)
+        _patch_storage(h, _make_mock_storage())
+        dialogue = Dialogue(
+            roles=[
+                Role(name="a", system_prompt="", prompt=lambda ctx: "prompt a"),
+                Role(name="b", system_prompt="", prompt=lambda ctx: "prompt b"),
+            ],
+            max_rounds=1,
+        )
+        pr = await h.pipeline([dialogue])
+        assert len(pr.results) == 1
+        assert pr.results[0].task_type == "dialogue"
+        assert isinstance(pr.results[0].output, DialogueOutput)
+        assert pr.results[0].output.rounds_completed == 1
+
+    @pytest.mark.asyncio
+    async def test_pipeline_dialogue_then_llm_can_access_output(
+        self, tmp_path, mock_runner
+    ) -> None:
+        """Dialogue 之后的 LLMTask 可以通过 results[-1].output 访问对话记录。"""
+        received: list = []
+
+        def capture_prompt(results):
+            received.append(results[-1].output)
+            return "总结"
+
+        h = Harness(project_path=str(tmp_path), runner=mock_runner)
+        _patch_storage(h, _make_mock_storage())
+        pr = await h.pipeline([
+            Dialogue(
+                roles=[
+                    Role(name="a", system_prompt="", prompt=lambda ctx: "x"),
+                ],
+                max_rounds=1,
+            ),
+            LLMTask(prompt=capture_prompt),
+        ])
+        assert len(received) == 1
+        assert isinstance(received[0], DialogueOutput)
