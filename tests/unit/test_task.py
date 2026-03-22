@@ -311,3 +311,46 @@ class TestTaskAlias:
             t = Task(prompt="hello")
             assert isinstance(t, LLMTask)
             assert t.prompt == "hello"
+
+
+# ---- Dialogue / Role / DialogueTurn / DialogueContext / DialogueOutput ----
+
+from harness.task import Dialogue, Role
+
+
+class TestRole:
+    def test_role_instantiation(self) -> None:
+        role = Role(
+            name="analyzer",
+            system_prompt="你是专家",
+            prompt=lambda ctx: "分析代码",
+        )
+        assert role.name == "analyzer"
+        assert role.system_prompt == "你是专家"
+        assert role.runner is None
+
+    def test_role_prompt_callable(self) -> None:
+        role = Role(
+            name="critic",
+            system_prompt="",
+            prompt=lambda ctx: f"round={ctx.round}",
+        )
+        # ctx 先不测，这里只验证 callable 存在
+        assert callable(role.prompt)
+
+
+class TestDialogue:
+    def test_dialogue_defaults(self) -> None:
+        d = Dialogue(
+            roles=[],
+            background="背景",
+        )
+        assert d.max_rounds == 3
+        assert d.until is None
+        assert d.background == "背景"
+
+    def test_dialogue_with_roles(self) -> None:
+        r = Role(name="a", system_prompt="", prompt=lambda ctx: "")
+        d = Dialogue(roles=[r], max_rounds=2)
+        assert len(d.roles) == 1
+        assert d.max_rounds == 2

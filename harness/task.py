@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from pydantic import BaseModel
 
@@ -36,7 +36,7 @@ class Result:
     """单个 Task 的执行结果。"""
 
     task_index: str  # 顺序步骤："0","1"; Parallel 子任务："2.0","2.1"
-    task_type: Literal["llm", "function", "shell", "polling"]
+    task_type: Literal["llm", "function", "shell", "polling", "dialogue"]
     output: BaseModel | str | Any
     raw_text: str | None
     tokens_used: int
@@ -170,10 +170,68 @@ class Parallel(BaseTask):
 
 
 # ---------------------------------------------------------------------------
+# Dialogue / Role
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DialogueTurn:
+    """一次角色发言记录。"""
+
+    round: int       # 轮次，从 0 开始
+    role_name: str
+    content: str
+
+
+@dataclass
+class DialogueOutput:
+    """Dialogue 执行结果，作为 Result.output 存储。"""
+
+    turns: list[DialogueTurn]
+    rounds_completed: int
+    final_speaker: str   # 最后发言的角色名
+    final_content: str   # 最后发言的内容
+
+
+@dataclass
+class Role:
+    """Dialogue 中的一个参与者。"""
+
+    name: str
+    system_prompt: str
+    prompt: Callable[["DialogueContext"], str]
+    runner: Any | None = None  # None 时继承 Harness 默认 runner
+
+
+@dataclass
+class Dialogue(BaseTask):
+    """多角色循环对话，每个角色维护独立 Claude session。
+
+    执行流程：
+    1. 按 roles 顺序，每个角色依次发言（一轮）
+    2. 整轮结束后检查 until 条件
+    3. 达到 max_rounds 或 until 返回 True 时终止
+    4. 向 pipeline results 追加单个 Result，output 为 DialogueOutput
+
+    v1 限制：不支持嵌套在 Parallel 内部。
+    """
+
+    roles: list[Role] = field(default_factory=list)
+    background: str = ""
+    max_rounds: int = 3
+    until: Callable[["DialogueContext"], bool] | None = None
+
+
+# Forward reference placeholder for type checking only
+if TYPE_CHECKING:
+    from harness._internal.dialogue import DialogueContext
+
+
+# ---------------------------------------------------------------------------
 # 类型别名
 # ---------------------------------------------------------------------------
 
-PipelineStep = LLMTask | FunctionTask | ShellTask | PollingTask | Parallel
+PipelineStep = LLMTask | FunctionTask | ShellTask | PollingTask | Parallel | Dialogue
 
 
 # ---------------------------------------------------------------------------
