@@ -379,3 +379,80 @@ class TestResumeDeserialization:
         assert isinstance(accessed_output[0], dict)
         assert accessed_output[0]["key"] == "value"
         assert accessed_output[0]["count"] == 7
+
+
+# ---- Dialogue 集成测试 ----
+
+from harness.task import Dialogue, DialogueOutput, Role
+from harness.runners.base import AbstractRunner, RunnerResult
+from tests.conftest import make_mock_storage, patch_storage
+
+
+class TestDialoguePipelineIntegration:
+    @pytest.mark.asyncio
+    async def test_full_pipeline_with_dialogue(self, tmp_path: Path, mock_runner) -> None:
+        """完整 pipeline：FunctionTask → Dialogue → FunctionTask。"""
+        h = Harness(str(tmp_path), runner=mock_runner)
+        patch_storage(h, make_mock_storage())
+
+        pr = await h.pipeline([
+            FunctionTask(fn=lambda r: "input_data"),
+            Dialogue(
+                background="分析代码质量",
+                roles=[
+                    Role(
+                        name="analyzer",
+                        system_prompt="你是分析者",
+                        prompt=lambda ctx: (
+                            "分析" if ctx.round == 0
+                            else f"修正分析，批评者说：{ctx.last_from('critic')}"
+                        ),
+                    ),
+                    Role(
+                        name="critic",
+                        system_prompt="你是批评者",
+                        prompt=lambda ctx: f"批评：{ctx.last_from('analyzer')}",
+                    ),
+                ],
+                max_rounds=2,
+            ),
+            FunctionTask(fn=lambda results: f"总结辩论：{results[-1].output.final_content}"),
+        ])
+
+        assert len(pr.results) == 3
+        assert pr.results[0].task_type == "function"
+        assert pr.results[1].task_type == "dialogue"
+        assert isinstance(pr.results[1].output, DialogueOutput)
+        assert pr.results[1].output.rounds_completed == 2
+        assert len(pr.results[1].output.turns) == 4  # 2 轮 × 2 角色
+        assert pr.results[2].task_type == "function"
+
+    @pytest.mark.asyncio
+    async def test_dialogue_until_stops_early(self, tmp_path: Path) -> None:
+        """until 条件满足时提前终止，只跑 1 轮。"""
+        call_count = 0
+
+        class CountingRunner(AbstractRunner):
+            async def execute(self, prompt, *, system_prompt, session_id, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                return RunnerResult(
+                    text="我同意" if "critic" in system_prompt else "分析",
+                    tokens_used=1,
+                    session_id=None,
+                )
+
+        h = Harness(str(tmp_path), runner=CountingRunner())
+        patch_storage(h, make_mock_storage())
+        pr = await h.pipeline([
+            Dialogue(
+                roles=[
+                    Role(name="analyzer", system_prompt="analyzer", prompt=lambda ctx: "分析"),
+                    Role(name="critic", system_prompt="critic", prompt=lambda ctx: "批评"),
+                ],
+                max_rounds=5,
+                until=lambda ctx: "我同意" in (ctx.last_from("critic") or ""),
+            )
+        ])
+        assert call_count == 2  # 只跑了 1 轮
+        assert pr.results[0].output.rounds_completed == 1
