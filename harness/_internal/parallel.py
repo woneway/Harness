@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any, Callable
 
 from harness._internal.exceptions import InvalidPipelineError, TaskFailedError
 from harness.task import (
@@ -35,6 +36,8 @@ async def execute_parallel(
     memory_injection: str,
     storage: "StorageProtocol | None" = None,
     is_new_session: bool = False,
+    harness_stream_callback: "Callable[[str], None] | None" = None,
+    harness_raw_stream_callback: "Callable[[dict], None] | None" = None,
 ) -> list[Result]:
     """并发执行 Parallel 块内的所有 Task。
 
@@ -60,15 +63,14 @@ async def execute_parallel(
             )
 
     # 构建子任务的协程列表
-    sub_tasks: list[asyncio.Task[Result]] = []
     task_indices: list[str] = []
-
-    loop = asyncio.get_event_loop()
+    task_types: list[str] = []
     coros = []
 
     for inner_index, task in enumerate(parallel.tasks):
         task_index = f"{outer_index}.{inner_index}"
         task_indices.append(task_index)
+        task_types.append(_task_type_str(task))
         coro = _execute_one(
             task,
             task_index,
@@ -81,13 +83,15 @@ async def execute_parallel(
             memory_injection=memory_injection,
             storage=storage,
             is_new_session=is_new_session,
+            harness_stream_callback=harness_stream_callback,
+            harness_raw_stream_callback=harness_raw_stream_callback,
         )
         coros.append(coro)
 
     if parallel.error_policy == "all_or_nothing":
         return await _run_all_or_nothing(coros, run_id, outer_index)
     else:
-        return await _run_best_effort(coros, task_indices)
+        return await _run_best_effort(coros, task_indices, task_types)
 
 
 async def _run_all_or_nothing(
@@ -123,17 +127,18 @@ async def _run_all_or_nothing(
 async def _run_best_effort(
     coros: list,
     task_indices: list[str],
+    task_types: list[str],
 ) -> list[Result]:
     """等待全部完成，失败的标记 success=False，不抛异常。"""
     results_raw = await asyncio.gather(*[asyncio.create_task(c) for c in coros], return_exceptions=True)
 
     results: list[Result] = []
-    for task_index, r in zip(task_indices, results_raw):
+    for task_index, task_type, r in zip(task_indices, task_types, results_raw):
         if isinstance(r, Exception):
             results.append(
                 Result(
                     task_index=task_index,
-                    task_type="function",  # best-effort 失败时 task_type 未知，用 function 占位
+                    task_type=task_type,
                     output=None,
                     raw_text=None,
                     tokens_used=0,
@@ -145,6 +150,19 @@ async def _run_best_effort(
         else:
             results.append(r)
     return results
+
+
+def _task_type_str(task: LLMTask | FunctionTask | ShellTask | PollingTask) -> str:
+    """返回 task 对应的 task_type 字符串，与 executor 保持一致。"""
+    if isinstance(task, LLMTask):
+        return "llm"
+    if isinstance(task, FunctionTask):
+        return "function"
+    if isinstance(task, ShellTask):
+        return "shell"
+    if isinstance(task, PollingTask):
+        return "polling"
+    return "unknown"
 
 
 async def _execute_one(
@@ -160,8 +178,13 @@ async def _execute_one(
     memory_injection: str,
     storage: "StorageProtocol | None",
     is_new_session: bool,
+    harness_stream_callback: "Callable[[str], None] | None" = None,
+    harness_raw_stream_callback: "Callable[[dict], None] | None" = None,
 ) -> Result:
-    """按任务类型派发到对应的 executor 函数。"""
+    """按任务类型派发到对应的 executor 函数。
+
+    LLMTask 的流回调优先级：Task 级 > Harness 级。
+    """
     from harness._internal.executor import (
         execute_function_task,
         execute_llm_task,
@@ -170,6 +193,11 @@ async def _execute_one(
     from harness._internal.polling import execute_polling
 
     if isinstance(task, LLMTask):
+        # 合并 Harness 级回调：Task 级优先，否则降级到 Harness 级
+        effective_cb = task.stream_callback or harness_stream_callback
+        effective_raw_cb = task.raw_stream_callback or harness_raw_stream_callback
+        if effective_cb is not task.stream_callback or effective_raw_cb is not task.raw_stream_callback:
+            task = replace(task, stream_callback=effective_cb, raw_stream_callback=effective_raw_cb)
         return await execute_llm_task(
             task,
             task_index,

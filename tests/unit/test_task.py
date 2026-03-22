@@ -205,6 +205,19 @@ class TestParallel:
         outer = Parallel(tasks=[inner])  # type: ignore[arg-type]
         assert len(outer.tasks) == 1
 
+    def test_positional_list_auto_corrected(self) -> None:
+        """Parallel([task_a, task_b]) 应等价于 Parallel(tasks=[task_a, task_b])。"""
+        tasks = [LLMTask(prompt="a"), ShellTask(cmd="ls")]
+        p = Parallel(tasks)  # type: ignore[arg-type]
+        assert p.tasks == tasks
+        assert p.config is None
+
+    def test_positional_list_and_tasks_raises(self) -> None:
+        """同时传位置列表和 tasks= 应抛 ValueError。"""
+        tasks = [LLMTask(prompt="a")]
+        with pytest.raises(ValueError, match="tasks="):
+            Parallel(tasks, tasks=tasks)  # type: ignore[arg-type]
+
     def test_callback_mutex_in_parallel(self) -> None:
         with pytest.raises(ValueError, match="mutually exclusive"):
             Parallel(

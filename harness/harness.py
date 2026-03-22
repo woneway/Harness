@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -252,7 +253,6 @@ class Harness:
 
         results: list[Result] = list(resumed_results)
         total_tokens = sum(r.tokens_used for r in results)
-        import time
         start_time = time.monotonic()
 
         # 构建 memory_injection
@@ -276,7 +276,6 @@ class Harness:
                 step_result: Result | list[Result]
 
                 if isinstance(task, Parallel):
-                    # 合并 task 级回调到 parallel 中（如果 parallel 没有自己的）
                     sub_results = await execute_parallel(
                         task,
                         outer_index,
@@ -289,6 +288,8 @@ class Harness:
                         memory_injection=memory_injection,
                         storage=self._storage,
                         is_new_session=session_manager.is_broken,
+                        harness_stream_callback=self._stream_callback,
+                        harness_raw_stream_callback=self._raw_stream_callback,
                     )
                     for r in sub_results:
                         await self._storage.save_task_log(

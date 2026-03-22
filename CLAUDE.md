@@ -109,22 +109,10 @@ harness/
 
 ## 已知问题（待修复）
 
-### Bug
-
-1. **`cli.py` 依赖未声明**（`harness.py:7-9`）：`typer` + `rich` 运行时需要，但 `pyproject.toml` 未列入依赖，有 `try/except ImportError` 兜底但不规范
-2. **`parallel.py:63,66` dead code**：`sub_tasks: list[...]` 和 `loop = asyncio.get_event_loop()` 声明后从未使用
-3. **Parallel 不继承 Harness stream_callback**（`harness.py:267-296`）：Parallel 块执行时未将 `self._stream_callback` / `self._raw_stream_callback` 传给 `execute_parallel()`，导致 Parallel 内 LLMTask 的流式输出无法触发 Harness 级回调
-4. **`harness.py:244` import 在方法体内**：`import time` 应移至文件顶部
-
 ### 设计文档偏差
 
 - `design/v1-design.md` Section 11 写 `--session-id`，实际 Claude CLI 使用 `--resume`（见 `claude_cli.py:131`）
 - ~~memory.md 兜底整理机制~~（已实现：`Memory.consolidation_system_prompt()`，末尾 LLMTask 无 schema 时自动注入整理提示）
-
-### 代码风格
-
-- `sql.py:9-11`：`_now()` 函数定义在 `from typing import Any` 之前，imports 排列混乱
-- `parallel.py:136`：`best_effort` 失败时 `task_type` 硬编码为 `"function"` 占位，有注释但会存入错误类型到数据库
 
 ## 测试
 

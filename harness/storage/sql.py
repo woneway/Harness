@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 from typing import Any
 
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from harness.storage.models import Base, Run, TaskLog
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class SQLStorage:
