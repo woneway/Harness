@@ -24,7 +24,8 @@ IterationForge 将成为 Harness 的第一个使用方。
 from harness import (
     Harness,
     LLMTask, FunctionTask, ShellTask, PollingTask, Parallel,
-    Task,           # LLMTask 的已废弃别名（v2 移除）
+    Dialogue, Role,         # 多角色辩论循环
+    Task,                   # LLMTask 的已废弃别名（v2 移除）
     Result, PipelineResult,
     TaskConfig, Memory,
 )
@@ -81,6 +82,7 @@ harness/
     executor.py        # Task 派发 + 重试 + session 管理 + prompt 注入
     parallel.py        # Parallel 并发执行（asyncio.gather + error_policy）
     polling.py         # PollingTask 轮询循环
+    dialogue.py        # Dialogue 多角色执行 + DialogueContext
     stream_parser.py   # Claude stream-json 逐行解析
     session.py         # SessionManager（pipeline 内 session 共享）
     exceptions.py      # TaskFailedError / ClaudeNotFoundError / ...
