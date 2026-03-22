@@ -18,12 +18,14 @@
 from harness.harness import Harness
 from harness.memory import Memory
 from harness.task import (
+    Dialogue,
     FunctionTask,
     LLMTask,
     Parallel,
     PipelineResult,
     PollingTask,
     Result,
+    Role,
     ShellTask,
     Task,
     TaskConfig,
@@ -36,6 +38,8 @@ __all__ = [
     "ShellTask",
     "PollingTask",
     "Parallel",
+    "Dialogue",
+    "Role",
     "Task",
     "Result",
     "PipelineResult",
