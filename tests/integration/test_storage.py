@@ -120,3 +120,51 @@ class TestListRuns:
         logs = await storage.get_task_logs("run-sl", success_only=True)
         assert len(logs) == 2
         assert all(l["success"] for l in logs)
+
+
+class TestOutputSchemaClass:
+    @pytest.mark.asyncio
+    async def test_output_schema_class_stored_and_retrieved(self, storage: SQLStorage) -> None:
+        """output_schema_class 字符串能正确存储并读取。"""
+        await storage.save_run("run-sc1", "/p", None)
+        await storage.save_task_log(
+            "run-sc1",
+            "0",
+            "function",
+            output='{"name": "test", "value": 1}',
+            output_schema_class="myapp.models.MyModel",
+        )
+        logs = await storage.get_task_logs("run-sc1")
+        assert len(logs) == 1
+        assert logs[0]["output_schema_class"] == "myapp.models.MyModel"
+
+    @pytest.mark.asyncio
+    async def test_output_schema_class_nullable(self, storage: SQLStorage) -> None:
+        """不传 output_schema_class 时默认为 None。"""
+        await storage.save_run("run-sc2", "/p", None)
+        await storage.save_task_log(
+            "run-sc2",
+            "0",
+            "llm",
+            output="some text",
+        )
+        logs = await storage.get_task_logs("run-sc2")
+        assert len(logs) == 1
+        assert logs[0]["output_schema_class"] is None
+
+    @pytest.mark.asyncio
+    async def test_output_schema_class_multiple_tasks(self, storage: SQLStorage) -> None:
+        """混合有/无 schema 的任务均能正确存取。"""
+        await storage.save_run("run-sc3", "/p", None)
+        await storage.save_task_log(
+            "run-sc3", "0", "function",
+            output='{"x": 1}',
+            output_schema_class="pkg.mod.Schema",
+        )
+        await storage.save_task_log(
+            "run-sc3", "1", "llm",
+            output="plain text",
+        )
+        logs = await storage.get_task_logs("run-sc3")
+        assert logs[0]["output_schema_class"] == "pkg.mod.Schema"
+        assert logs[1]["output_schema_class"] is None

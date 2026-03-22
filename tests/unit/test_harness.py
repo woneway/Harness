@@ -341,6 +341,139 @@ class TestMemoryConsolidation:
         assert str(tmp_path / ".harness" / "memory.md") in runner.captured[0]
 
 
+# ---------------------------------------------------------------------------
+# 静默异常修复：memory injection 和 notifier 失败应记录 warning
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_storage() -> MagicMock:
+    """构造一个完整 mock 的 SQLStorage，所有方法均为 AsyncMock。"""
+    storage = MagicMock()
+    storage.init = AsyncMock()
+    storage.save_run = AsyncMock()
+    storage.save_task_log = AsyncMock()
+    storage.update_run = AsyncMock()
+    storage.get_task_logs = AsyncMock(return_value=[])
+    return storage
+
+
+def _patch_storage(h: Harness, storage: MagicMock) -> None:
+    """将 Harness 内部的存储替换为 mock，并标记已初始化。"""
+    h._storage = storage
+    h._initialized = True
+
+
+class TestSilentExceptionFixes:
+    @pytest.mark.asyncio
+    async def test_memory_injection_failure_logs_warning(
+        self, tmp_path: Path
+    ) -> None:
+        """memory injection 失败时应记录 warning，pipeline 正常继续执行。"""
+        from harness.memory import Memory
+
+        memory = Memory()
+        h = make_harness(tmp_path, memory=memory)
+        _patch_storage(h, _make_mock_storage())
+
+        with patch.object(
+            memory,
+            "build_injection",
+            new=AsyncMock(side_effect=RuntimeError("injection error")),
+        ):
+            with patch("harness.harness.logger") as mock_logger:
+                result = await h.pipeline([FunctionTask(fn=lambda r: "ok")])
+
+        # pipeline 应正常完成
+        assert result.results[0].success is True
+        # warning 应被记录，且包含失败原因
+        mock_logger.warning.assert_called_once()
+        warning_msg = mock_logger.warning.call_args[0][0]
+        assert "injection" in warning_msg.lower() or "memory" in warning_msg.lower()
+
+    @pytest.mark.asyncio
+    async def test_memory_injection_failure_pipeline_continues(
+        self, tmp_path: Path
+    ) -> None:
+        """memory injection 失败后，pipeline 仍能正常返回结果，不抛异常。"""
+        from harness.memory import Memory
+
+        memory = Memory()
+        h = make_harness(tmp_path, memory=memory)
+        _patch_storage(h, _make_mock_storage())
+
+        call_count = [0]
+
+        def counting_fn(results):
+            call_count[0] += 1
+            return "done"
+
+        with patch.object(
+            memory,
+            "build_injection",
+            new=AsyncMock(side_effect=ValueError("bad injection")),
+        ):
+            result = await h.pipeline([FunctionTask(fn=counting_fn)])
+
+        # 函数被执行，pipeline 不因 memory 失败而中断
+        assert call_count[0] == 1
+        assert result.results[0].output == "done"
+
+    @pytest.mark.asyncio
+    async def test_notifier_failure_logs_warning_on_success(
+        self, tmp_path: Path
+    ) -> None:
+        """pipeline 成功后 notifier 抛异常，应记录 warning，结果正确返回。"""
+        from harness.notifier.base import AbstractNotifier
+
+        class FailingNotifier(AbstractNotifier):
+            async def notify(self, *, title, body, success):
+                raise RuntimeError("network error")
+
+        h = make_harness(tmp_path, notifier=FailingNotifier())
+        _patch_storage(h, _make_mock_storage())
+
+        with patch("harness.harness.logger") as mock_logger:
+            result = await h.pipeline([FunctionTask(fn=lambda r: "ok")])
+
+        # pipeline 结果正确
+        assert result.results[0].success is True
+        # warning 被记录
+        mock_logger.warning.assert_called_once()
+        warning_msg = mock_logger.warning.call_args[0][0]
+        assert "notif" in warning_msg.lower()
+
+    @pytest.mark.asyncio
+    async def test_notifier_failure_logs_warning_on_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """pipeline 失败后 notifier 抛异常，应记录 warning，原始 TaskFailedError 仍被抛出。"""
+        from harness.notifier.base import AbstractNotifier
+
+        class FailingNotifier(AbstractNotifier):
+            async def notify(self, *, title, body, success):
+                raise ConnectionError("timeout")
+
+        h = make_harness(
+            tmp_path,
+            notifier=FailingNotifier(),
+        )
+        _patch_storage(h, _make_mock_storage())
+
+        failing_task = FunctionTask(
+            fn=lambda r: (_ for _ in ()).throw(RuntimeError("task boom")),
+            config=TaskConfig(max_retries=0),
+        )
+
+        with patch("harness.harness.logger") as mock_logger:
+            with pytest.raises(TaskFailedError):
+                await h.pipeline([failing_task])
+
+        # warning 被记録
+        mock_logger.warning.assert_called_once()
+        warning_msg = mock_logger.warning.call_args[0][0]
+        assert "notif" in warning_msg.lower()
+
+
 class TestTaskDeprecationInHarness:
     @pytest.mark.asyncio
     async def test_task_alias_works_in_pipeline(self, tmp_path: Path) -> None:

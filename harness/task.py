@@ -143,12 +143,17 @@ class Parallel(BaseTask):
     支持两种等价写法：
         Parallel(tasks=[task_a, task_b])   # 推荐，明确
         Parallel([task_a, task_b])          # 便捷，自动修正
+
+    Attributes:
+        max_retries: 整块 Parallel 的最大重试次数（all_or_nothing 策略生效）。
+            默认值 2，与 TaskConfig.max_retries 保持一致。0 表示不重试。
     """
 
     tasks: list[LLMTask | FunctionTask | ShellTask | PollingTask] = field(
         default_factory=list
     )
     error_policy: Literal["all_or_nothing", "best_effort"] = "all_or_nothing"
+    max_retries: int = 2
 
     def __post_init__(self) -> None:
         # 用户写 Parallel([task_a, task_b]) 时，list 会落到继承自 BaseTask 的

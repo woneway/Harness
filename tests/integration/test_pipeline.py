@@ -279,3 +279,103 @@ class TestResumeFrom:
         pr2 = await h.pipeline(tasks, resume_from=pr1.run_id)
         # fn0 应被重新调用（Parallel 块整体重跑）
         assert parallel_call_counts[0] == 2
+
+
+# ---------------------------------------------------------------------------
+# resume_from 续跑时 output 反序列化
+# ---------------------------------------------------------------------------
+
+
+class TestResumeDeserialization:
+    @pytest.mark.asyncio
+    async def test_resumed_result_output_is_model_instance(self, tmp_path: Path) -> None:
+        """续跑时，前序成功步骤的 output 应反序列化为 Pydantic 模型实例，而非 JSON 字符串。"""
+        from pydantic import BaseModel as _BM
+
+        class StepOutput(_BM):
+            value: int
+            label: str
+
+        h = make_harness(tmp_path)
+
+        # 第一次跑：Task 0 成功产出 Pydantic 模型，Task 1 失败
+        task0_result: list = []
+
+        def task0(results):
+            return StepOutput(value=42, label="hello")
+
+        def task1_fail(results):
+            raise RuntimeError("deliberate failure")
+
+        tasks = [
+            FunctionTask(fn=task0, output_schema=StepOutput),
+            FunctionTask(fn=task1_fail, config=TaskConfig(max_retries=0)),
+        ]
+
+        failed_run_id = None
+        try:
+            await h.pipeline(tasks)
+        except TaskFailedError as e:
+            failed_run_id = e.run_id
+
+        assert failed_run_id is not None
+
+        # 续跑：Task 0 应跳过，resumed_results[0].output 应是 StepOutput 实例
+        def task1_ok(results):
+            # 核心验证：results[0].output 必须是 StepOutput 实例，否则这里崩溃
+            assert isinstance(results[0].output, StepOutput), (
+                f"Expected StepOutput, got {type(results[0].output)}: {results[0].output!r}"
+            )
+            return results[0].output.value + results[0].output.label
+
+        tasks2 = [
+            FunctionTask(fn=task0, output_schema=StepOutput),
+            FunctionTask(fn=task1_ok),
+        ]
+
+        result = await h.pipeline(tasks2, resume_from=failed_run_id)
+        assert result.results[0].output.value == 42  # type: ignore[union-attr]
+        assert result.results[0].output.label == "hello"  # type: ignore[union-attr]
+        assert result.results[1].output == "42hello"
+
+    @pytest.mark.asyncio
+    async def test_resumed_result_output_no_schema_returns_parsed_json(
+        self, tmp_path: Path
+    ) -> None:
+        """续跑时，无 schema 的前序步骤 output 应尝试 JSON 解析（兼容 dict）。"""
+        h = make_harness(tmp_path)
+
+        def task0_dict(results):
+            return {"key": "value", "count": 7}
+
+        def task1_fail(results):
+            raise RuntimeError("fail")
+
+        tasks = [
+            FunctionTask(fn=task0_dict),
+            FunctionTask(fn=task1_fail, config=TaskConfig(max_retries=0)),
+        ]
+
+        failed_run_id = None
+        try:
+            await h.pipeline(tasks)
+        except TaskFailedError as e:
+            failed_run_id = e.run_id
+
+        assert failed_run_id is not None
+
+        accessed_output: list = []
+
+        def task1_ok(results):
+            accessed_output.append(results[0].output)
+            return "done"
+
+        tasks2 = [
+            FunctionTask(fn=task0_dict),
+            FunctionTask(fn=task1_ok),
+        ]
+        await h.pipeline(tasks2, resume_from=failed_run_id)
+        # output 应该是 dict（JSON 解析后），不是字符串
+        assert isinstance(accessed_output[0], dict)
+        assert accessed_output[0]["key"] == "value"
+        assert accessed_output[0]["count"] == 7

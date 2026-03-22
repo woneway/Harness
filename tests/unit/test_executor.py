@@ -208,6 +208,136 @@ class TestExecuteLLMTask:
 
 
 # ---------------------------------------------------------------------------
+# 前序上下文注入时机测试
+# ---------------------------------------------------------------------------
+
+
+class MockStorage:
+    """最小化 StorageProtocol 实现，用于注入时机测试。"""
+
+    def __init__(self, logs: list[dict]) -> None:
+        self._logs = logs
+        self.get_task_logs_call_count = 0
+
+    async def get_task_logs(self, run_id: str, *, success_only: bool = False) -> list[dict]:
+        self.get_task_logs_call_count += 1
+        return self._logs
+
+    # 其余方法不需要实现
+    async def create_run(self, *a, **kw): ...
+    async def update_run(self, *a, **kw): ...
+    async def log_task(self, *a, **kw): ...
+    async def get_runs(self, *a, **kw): return []
+    async def get_run(self, *a, **kw): return None
+
+
+class CapturingPromptRunner(AbstractRunner):
+    """捕获每次 execute() 接收到的 prompt，总是返回成功。"""
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def execute(self, prompt: str, *, system_prompt: str, session_id, **kwargs) -> RunnerResult:
+        self.prompts.append(prompt)
+        return RunnerResult(text="ok", tokens_used=0, session_id="s-new")
+
+
+class TestContextInjectionTiming:
+    """验证前序上下文注入只在新 session 时触发，重试新 session 也应注入。"""
+
+    _prior_logs = [
+        {"task_index": "0", "task_type": "function", "output": "data collected"}
+    ]
+
+    @pytest.mark.asyncio
+    async def test_context_injected_on_new_session_first_attempt(self) -> None:
+        """首次 attempt 且 is_new_session=True 时，前序上下文应注入到 prompt。"""
+        runner = CapturingPromptRunner()
+        storage = MockStorage(self._prior_logs)
+        task = LLMTask(prompt="analyze data")
+
+        await execute_llm_task(
+            task, "1", [], "run-1",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=None,
+            session_manager=make_session(),
+            memory_injection="",
+            is_new_session=True,
+            storage=storage,
+        )
+
+        assert len(runner.prompts) == 1
+        assert "前序任务输出" in runner.prompts[0]
+        assert "data collected" in runner.prompts[0]
+        assert "analyze data" in runner.prompts[0]
+
+    @pytest.mark.asyncio
+    async def test_context_injected_on_new_session_retry(self) -> None:
+        """首次 attempt 失败后 session 被标记为 broken，重试时 is_new_session=True，
+        也应注入前序上下文（这是本 bug 修复的核心场景）。"""
+        call_count = 0
+
+        class FailThenSucceedRunner(AbstractRunner):
+            def __init__(self) -> None:
+                self.prompts: list[str] = []
+
+            async def execute(self, prompt: str, *, system_prompt: str, session_id, **kwargs) -> RunnerResult:
+                nonlocal call_count
+                call_count += 1
+                self.prompts.append(prompt)
+                if call_count == 1:
+                    raise RuntimeError("session broken")
+                return RunnerResult(text="ok", tokens_used=0, session_id="s-retry")
+
+        runner = FailThenSucceedRunner()
+        storage = MockStorage(self._prior_logs)
+        task = LLMTask(prompt="analyze data", config=TaskConfig(max_retries=1, backoff_base=0.01))
+
+        await execute_llm_task(
+            task, "1", [], "run-1",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=None,
+            session_manager=make_session(),
+            memory_injection="",
+            is_new_session=False,  # 首次调用时不是新 session
+            storage=storage,
+        )
+
+        assert call_count == 2
+        # 第一次 attempt（session 未断）不注入
+        assert "前序任务输出" not in runner.prompts[0]
+        # 第二次 attempt（session 断开，新 session）必须注入
+        assert "前序任务输出" in runner.prompts[1], (
+            "重试时生成了新 session，应当注入前序上下文，但实际未注入"
+        )
+        assert "data collected" in runner.prompts[1]
+
+    @pytest.mark.asyncio
+    async def test_context_not_injected_when_session_reused(self) -> None:
+        """is_new_session=False 时，不应注入前序上下文（session 复用场景）。"""
+        runner = CapturingPromptRunner()
+        storage = MockStorage(self._prior_logs)
+        task = LLMTask(prompt="analyze data")
+
+        await execute_llm_task(
+            task, "1", [], "run-1",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=None,
+            session_manager=make_session(),
+            memory_injection="",
+            is_new_session=False,
+            storage=storage,
+        )
+
+        assert len(runner.prompts) == 1
+        assert "前序任务输出" not in runner.prompts[0]
+        assert runner.prompts[0] == "analyze data"
+
+
+# ---------------------------------------------------------------------------
 # FunctionTask 执行
 # ---------------------------------------------------------------------------
 

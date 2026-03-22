@@ -226,6 +226,22 @@ class TestParallel:
                 raw_stream_callback=lambda e: None,
             )
 
+    def test_parallel_max_retries_field(self) -> None:
+        """验证 max_retries 字段存在且默认值为 2。"""
+        p = Parallel(tasks=[])
+        assert hasattr(p, "max_retries")
+        assert p.max_retries == 2
+
+    def test_parallel_max_retries_custom(self) -> None:
+        """验证 max_retries 可以自定义。"""
+        p = Parallel(tasks=[], max_retries=5)
+        assert p.max_retries == 5
+
+    def test_parallel_max_retries_zero(self) -> None:
+        """验证 max_retries=0 合法（不重试）。"""
+        p = Parallel(tasks=[], max_retries=0)
+        assert p.max_retries == 0
+
 
 # ---------------------------------------------------------------------------
 # Result / PipelineResult

@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+logger = logging.getLogger(__name__)
+
+from harness._internal.deserialize import deserialize_output
 from harness._internal.exceptions import InvalidPipelineError, TaskFailedError
 from harness._internal.executor import (
     execute_function_task,
@@ -32,6 +36,17 @@ from harness.task import (
     ShellTask,
     TaskConfig,
 )
+
+
+def _schema_class_path(task: object) -> str | None:
+    """返回 task.output_schema 的完整限定名，用于数据库存储。
+
+    若 task 无 output_schema 属性或值为 None，则返回 None。
+    """
+    schema = getattr(task, "output_schema", None)
+    if schema is None:
+        return None
+    return f"{schema.__module__}.{schema.__qualname__}"
 
 
 def _extract_run_summary(results: list[Result]) -> str:
@@ -227,11 +242,13 @@ class Harness:
                 if idx in skipped_indices:
                     task_type = log.get("task_type", "function")
                     output_raw = log.get("output")
+                    schema_class_path = log.get("output_schema_class")
+                    deserialized = deserialize_output(output_raw, schema_class_path)
                     resumed_results.append(
                         Result(
                             task_index=idx,
                             task_type=task_type,
-                            output=output_raw,
+                            output=deserialized,
                             raw_text=log.get("raw_text"),
                             tokens_used=log.get("tokens_used", 0),
                             duration_seconds=log.get("duration_seconds", 0.0),
@@ -262,8 +279,10 @@ class Harness:
                 memory_injection = await self._memory.build_injection(
                     self._storage, self._project_path
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    f"Memory injection failed, proceeding without it: {e}"
+                )
 
         try:
             for outer_index, task in enumerate(tasks):
@@ -292,11 +311,19 @@ class Harness:
                         harness_raw_stream_callback=self._raw_stream_callback,
                     )
                     for r in sub_results:
+                        # 从 task_index（如 "2.1"）解析子任务索引以获取 schema
+                        sub_idx_str = r.task_index.split(".", 1)[-1]
+                        try:
+                            sub_task = task.tasks[int(sub_idx_str)]
+                            sub_schema_path = _schema_class_path(sub_task)
+                        except (ValueError, IndexError):
+                            sub_schema_path = None
                         await self._storage.save_task_log(
                             run_id,
                             r.task_index,
                             r.task_type,
                             output=r.output,
+                            output_schema_class=sub_schema_path,
                             raw_text=r.raw_text,
                             tokens_used=r.tokens_used,
                             duration_seconds=r.duration_seconds,
@@ -384,6 +411,7 @@ class Harness:
                     r.task_index,
                     r.task_type,
                     output=r.output,
+                    output_schema_class=_schema_class_path(task),
                     raw_text=r.raw_text,
                     tokens_used=r.tokens_used,
                     duration_seconds=r.duration_seconds,
@@ -411,8 +439,10 @@ class Harness:
                         body=summary,
                         success=False,
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(
+                        f"Notifier failed to send notification: {e}"
+                    )
             raise
 
         total_duration = time.monotonic() - start_time
@@ -431,8 +461,10 @@ class Harness:
                     body=summary,
                     success=True,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    f"Notifier failed to send notification: {e}"
+                )
 
         return PipelineResult(
             run_id=run_id,

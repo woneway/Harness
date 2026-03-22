@@ -146,3 +146,108 @@ class TestNestedParallelValidation:
         outer = Parallel(tasks=[inner])  # type: ignore[arg-type]
         with pytest.raises(InvalidPipelineError):
             await execute_parallel(outer, 0, [], **make_parallel_kwargs())
+
+
+class TestParallelMaxRetries:
+    """测试 Parallel 块级最大重试限制（all_or_nothing 策略）。
+
+    注意：子 Task 使用 config=TaskConfig(max_retries=0) 以排除子任务内部重试的干扰，
+    确保 call_count 计数仅反映"整块重试次数 × 子任务数"。
+    """
+
+    @pytest.mark.asyncio
+    async def test_parallel_max_retries_exceeded(self) -> None:
+        """all_or_nothing 策略下，子 Task 持续失败，达到 max_retries 后抛 TaskFailedError。"""
+        call_count = 0
+        no_retry_config = TaskConfig(max_retries=0)
+
+        def always_fail(results):
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("persistent failure")
+
+        parallel = Parallel(
+            tasks=[FunctionTask(fn=always_fail, config=no_retry_config)],
+            error_policy="all_or_nothing",
+            max_retries=2,
+        )
+        with pytest.raises(TaskFailedError):
+            await execute_parallel(parallel, 0, [], **make_parallel_kwargs())
+
+        # max_retries=2 意味着最多执行 3 次（初始 1 次 + 2 次重试）
+        assert call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_parallel_max_retries_default(self) -> None:
+        """验证 Parallel.max_retries 默认值为 2。"""
+        parallel = Parallel(tasks=[])
+        assert parallel.max_retries == 2
+
+    @pytest.mark.asyncio
+    async def test_parallel_succeeds_within_retries(self) -> None:
+        """第 2 次重试时子 Task 成功，整块应成功返回结果。"""
+        call_count = 0
+        no_retry_config = TaskConfig(max_retries=0)
+
+        def succeed_on_third(results):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise RuntimeError(f"attempt {call_count} failed")
+            return "success"
+
+        parallel = Parallel(
+            tasks=[FunctionTask(fn=succeed_on_third, config=no_retry_config)],
+            error_policy="all_or_nothing",
+            max_retries=2,
+        )
+        results = await execute_parallel(parallel, 0, [], **make_parallel_kwargs())
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert results[0].output == "success"
+        assert call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_parallel_max_retries_zero_no_retry(self) -> None:
+        """max_retries=0 时，失败不重试，直接抛 TaskFailedError。"""
+        call_count = 0
+        no_retry_config = TaskConfig(max_retries=0)
+
+        def always_fail(results):
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("fail")
+
+        parallel = Parallel(
+            tasks=[FunctionTask(fn=always_fail, config=no_retry_config)],
+            error_policy="all_or_nothing",
+            max_retries=0,
+        )
+        with pytest.raises(TaskFailedError):
+            await execute_parallel(parallel, 0, [], **make_parallel_kwargs())
+
+        assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_parallel_max_retries_best_effort_not_affected(self) -> None:
+        """best_effort 策略下，max_retries 字段存在但整块不重试，失败的子 Task 标记 success=False。"""
+        call_count = 0
+        no_retry_config = TaskConfig(max_retries=0)
+
+        def always_fail(results):
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("fail")
+
+        parallel = Parallel(
+            tasks=[FunctionTask(fn=always_fail, config=no_retry_config)],
+            error_policy="best_effort",
+            max_retries=2,
+        )
+        results = await execute_parallel(parallel, 0, [], **make_parallel_kwargs())
+
+        # best_effort 不受整块 max_retries 影响，返回失败结果而非重试
+        assert len(results) == 1
+        assert results[0].success is False
+        assert call_count == 1

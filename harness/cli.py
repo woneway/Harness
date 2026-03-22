@@ -115,7 +115,6 @@ def migrate(
                         run_id,
                         log["task_index"],
                         log["task_type"],
-                        prompt_preview=log.get("prompt_preview"),
                         output=log.get("output"),
                         raw_text=log.get("raw_text"),
                         tokens_used=log.get("tokens_used", 0),

@@ -106,13 +106,15 @@ async def execute_llm_task(
     attempt = 0
 
     while attempt <= config.max_retries:
-        # session 断开时注入前序上下文
+        # session 断开时注入前序上下文（只在进入新 session 的第一次调用时注入）
         current_prompt = prompt_text
-        if is_new_session and storage is not None and attempt == 0:
+        if is_new_session and storage is not None:
             prior_logs = await storage.get_task_logs(run_id, success_only=True)
             if prior_logs:
                 context = _build_prior_context(prior_logs)
                 current_prompt = context + "\n\n" + prompt_text
+            # 标记已消费：同一 session 内后续 attempt（如 schema 校验重试）不重复注入
+            is_new_session = False
 
         try:
             result_obj = await asyncio.wait_for(

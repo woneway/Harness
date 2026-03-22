@@ -62,18 +62,10 @@ async def execute_parallel(
                 f"Found Parallel inside Parallel at index {outer_index}."
             )
 
-    # 构建子任务的协程列表
-    task_indices: list[str] = []
-    task_types: list[str] = []
-    coros = []
-
-    for inner_index, task in enumerate(parallel.tasks):
-        task_index = f"{outer_index}.{inner_index}"
-        task_indices.append(task_index)
-        task_types.append(_task_type_str(task))
-        coro = _execute_one(
-            task,
-            task_index,
+    if parallel.error_policy == "all_or_nothing":
+        return await _run_all_or_nothing_with_retry(
+            parallel,
+            outer_index,
             results,
             run_id,
             harness_system_prompt=harness_system_prompt,
@@ -86,12 +78,95 @@ async def execute_parallel(
             harness_stream_callback=harness_stream_callback,
             harness_raw_stream_callback=harness_raw_stream_callback,
         )
-        coros.append(coro)
-
-    if parallel.error_policy == "all_or_nothing":
-        return await _run_all_or_nothing(coros, run_id, outer_index)
     else:
+        # best_effort：一次性构建协程并等待全部完成
+        task_indices: list[str] = []
+        task_types: list[str] = []
+        coros = []
+        for inner_index, task in enumerate(parallel.tasks):
+            task_index = f"{outer_index}.{inner_index}"
+            task_indices.append(task_index)
+            task_types.append(_task_type_str(task))
+            coro = _execute_one(
+                task,
+                task_index,
+                results,
+                run_id,
+                harness_system_prompt=harness_system_prompt,
+                harness_runner=harness_runner,
+                harness_config=harness_config,
+                session_manager=session_manager,
+                memory_injection=memory_injection,
+                storage=storage,
+                is_new_session=is_new_session,
+                harness_stream_callback=harness_stream_callback,
+                harness_raw_stream_callback=harness_raw_stream_callback,
+            )
+            coros.append(coro)
         return await _run_best_effort(coros, task_indices, task_types)
+
+
+async def _run_all_or_nothing_with_retry(
+    parallel: Parallel,
+    outer_index: int,
+    results: list[Result],
+    run_id: str,
+    *,
+    harness_system_prompt: str,
+    harness_runner: "AbstractRunner",
+    harness_config: TaskConfig | None,
+    session_manager: "SessionManager",
+    memory_injection: str,
+    storage: "StorageProtocol | None",
+    is_new_session: bool,
+    harness_stream_callback: "Callable[[str], None] | None" = None,
+    harness_raw_stream_callback: "Callable[[dict], None] | None" = None,
+) -> list[Result]:
+    """all_or_nothing 策略：带整块重试上限（parallel.max_retries）的执行。
+
+    重试计数语义与 TaskConfig.max_retries 一致：
+        max_retries=0 → 只执行 1 次，不重试
+        max_retries=2 → 最多执行 3 次（初始 + 2 次重试）
+
+    每次重试前重新构建协程列表（子 Task 状态无关）。
+    重试间退避：固定 1 秒（Parallel 块级，不依赖 TaskConfig.backoff_base）。
+    """
+    attempt = 0
+    last_exc: Exception | None = None
+
+    while attempt <= parallel.max_retries:
+        # 每次尝试重新构建协程，避免复用已消耗的协程
+        coros = []
+        for inner_index, task in enumerate(parallel.tasks):
+            task_index = f"{outer_index}.{inner_index}"
+            coro = _execute_one(
+                task,
+                task_index,
+                results,
+                run_id,
+                harness_system_prompt=harness_system_prompt,
+                harness_runner=harness_runner,
+                harness_config=harness_config,
+                session_manager=session_manager,
+                memory_injection=memory_injection,
+                storage=storage,
+                is_new_session=is_new_session,
+                harness_stream_callback=harness_stream_callback,
+                harness_raw_stream_callback=harness_raw_stream_callback,
+            )
+            coros.append(coro)
+
+        try:
+            return await _run_all_or_nothing(coros, run_id, outer_index)
+        except Exception as e:
+            last_exc = e
+            attempt += 1
+            if attempt <= parallel.max_retries:
+                await asyncio.sleep(1)
+
+    # 所有尝试均已耗尽，传播最后一次异常
+    assert last_exc is not None
+    raise last_exc
 
 
 async def _run_all_or_nothing(

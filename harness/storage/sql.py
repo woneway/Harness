@@ -35,11 +35,23 @@ class SQLStorage:
         )
 
     async def init(self) -> None:
-        """创建数据库表，SQLite 启用 WAL 模式。"""
+        """创建数据库表，SQLite 启用 WAL 模式，并迁移旧表结构。"""
         async with self._engine.begin() as conn:
             if self._url.startswith("sqlite"):
                 await conn.execute(text("PRAGMA journal_mode=WAL"))
             await conn.run_sync(Base.metadata.create_all)
+
+            # 迁移：为已有 SQLite 数据库添加 output_schema_class 列
+            if self._url.startswith("sqlite"):
+                result = await conn.execute(text("PRAGMA table_info(task_logs)"))
+                columns = {row[1] for row in result}
+                if "output_schema_class" not in columns:
+                    await conn.execute(
+                        text(
+                            "ALTER TABLE task_logs "
+                            "ADD COLUMN output_schema_class VARCHAR(255)"
+                        )
+                    )
 
     async def save_run(
         self,
@@ -88,8 +100,8 @@ class SQLStorage:
         task_index: str,
         task_type: str,
         *,
-        prompt_preview: str | None = None,
         output: Any = None,
+        output_schema_class: str | None = None,
         raw_text: str | None = None,
         tokens_used: int = 0,
         duration_seconds: float = 0.0,
@@ -114,8 +126,8 @@ class SQLStorage:
                 run_id=run_id,
                 task_index=task_index,
                 task_type=task_type,
-                prompt_preview=prompt_preview,
                 output=output_str,
+                output_schema_class=output_schema_class,
                 raw_text=raw_text,
                 tokens_used=tokens_used,
                 duration_seconds=duration_seconds,
@@ -195,8 +207,8 @@ class SQLStorage:
                     "run_id": r.run_id,
                     "task_index": r.task_index,
                     "task_type": r.task_type,
-                    "prompt_preview": r.prompt_preview,
                     "output": r.output,
+                    "output_schema_class": r.output_schema_class,
                     "raw_text": r.raw_text,
                     "tokens_used": r.tokens_used,
                     "duration_seconds": r.duration_seconds,
