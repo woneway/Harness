@@ -354,3 +354,17 @@ class TestDialogue:
         d = Dialogue(roles=[r], max_rounds=2)
         assert len(d.roles) == 1
         assert d.max_rounds == 2
+
+    def test_dialogue_turn_mode_defaults(self) -> None:
+        """回合模式新字段默认值。"""
+        d = Dialogue(roles=[])
+        assert d.next_speaker is None
+        assert d.max_turns is None
+
+    def test_dialogue_next_speaker_callable(self) -> None:
+        d = Dialogue(roles=[], next_speaker=lambda h: "a")
+        assert callable(d.next_speaker)
+
+    def test_dialogue_max_turns_explicit(self) -> None:
+        d = Dialogue(roles=[], max_turns=20)
+        assert d.max_turns == 20

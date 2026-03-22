@@ -269,3 +269,247 @@ class TestExecuteDialogueBasic:
         # round 1 时，analyzer 应该 resume 上一轮的 session
         assert session_ids_by_role["analyzer"][1] == "sess-analyzer"
         assert session_ids_by_role["critic"][1] == "sess-critic"
+
+
+# ---- 轮次模式：until 在每次发言后检查 ----
+
+class TestRoundModeUntilPerTurn:
+    @pytest.mark.asyncio
+    async def test_until_stops_mid_round(self) -> None:
+        """until 在第 2 个角色发言后触发，第 3 个角色不应再发言。"""
+        call_count = 0
+
+        class CountingRunner(AbstractRunner):
+            async def execute(self, prompt, *, system_prompt, session_id, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                text = "stop" if call_count == 2 else "ok"
+                return RunnerResult(text=text, tokens_used=1, session_id=None)
+
+        dialogue = Dialogue(
+            roles=[
+                Role(name="a", system_prompt="", prompt=lambda ctx: "p"),
+                Role(name="b", system_prompt="", prompt=lambda ctx: "p"),
+                Role(name="c", system_prompt="", prompt=lambda ctx: "p"),
+            ],
+            max_rounds=3,
+            until=lambda ctx: "stop" in (ctx.last_from("b") or ""),
+        )
+        result = await execute_dialogue(
+            dialogue=dialogue,
+            outer_index=0,
+            pipeline_results=[],
+            run_id="r1",
+            harness_system_prompt="",
+            harness_runner=CountingRunner(),
+            harness_config=None,
+        )
+        assert call_count == 2          # c 没有发言
+        assert len(result.output.turns) == 2
+        assert result.output.rounds_completed == 1
+
+    @pytest.mark.asyncio
+    async def test_until_after_first_role_in_round2(self) -> None:
+        """第 2 轮第 1 个角色触发 until，第 2 轮剩余角色不再发言。"""
+        call_count = 0
+
+        class CountingRunner(AbstractRunner):
+            async def execute(self, prompt, *, system_prompt, session_id, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                # 第 3 次调用（round1 的 a）返回 "done"
+                return RunnerResult(
+                    text="done" if call_count == 3 else "ok",
+                    tokens_used=1,
+                    session_id=None,
+                )
+
+        dialogue = Dialogue(
+            roles=[
+                Role(name="a", system_prompt="", prompt=lambda ctx: "p"),
+                Role(name="b", system_prompt="", prompt=lambda ctx: "p"),
+            ],
+            max_rounds=3,
+            until=lambda ctx: "done" in (ctx.last_from("a") or ""),
+        )
+        result = await execute_dialogue(
+            dialogue=dialogue,
+            outer_index=0,
+            pipeline_results=[],
+            run_id="r2",
+            harness_system_prompt="",
+            harness_runner=CountingRunner(),
+            harness_config=None,
+        )
+        assert call_count == 3          # round0: a,b  round1: a(done) → 停止，b 不再发言
+        assert result.output.rounds_completed == 2
+
+
+# ---- 回合模式 ----
+
+class TestTurnMode:
+    @pytest.mark.asyncio
+    async def test_next_speaker_controls_order(self) -> None:
+        """next_speaker 决定每次发言的角色。"""
+        runner = MockRunner(["r0", "r1", "r2", "r3"])
+        order = ["a", "b", "a", "b"]
+        idx = [0]
+
+        def my_next(history):
+            role = order[len(history)]
+            return role
+
+        dialogue = Dialogue(
+            roles=[
+                Role(name="a", system_prompt="", prompt=lambda ctx: "p"),
+                Role(name="b", system_prompt="", prompt=lambda ctx: "p"),
+            ],
+            max_turns=4,
+            next_speaker=my_next,
+        )
+        result = await execute_dialogue(
+            dialogue=dialogue,
+            outer_index=0,
+            pipeline_results=[],
+            run_id="t1",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=None,
+        )
+        assert runner._call_count == 4
+        assert [t.role_name for t in result.output.turns] == ["a", "b", "a", "b"]
+
+    @pytest.mark.asyncio
+    async def test_max_turns_respected(self) -> None:
+        """回合模式不超过 max_turns。"""
+        runner = MockRunner(["ok"] * 100)
+        dialogue = Dialogue(
+            roles=[
+                Role(name="a", system_prompt="", prompt=lambda ctx: "p"),
+                Role(name="b", system_prompt="", prompt=lambda ctx: "p"),
+            ],
+            max_turns=5,
+            next_speaker=lambda h: "a" if len(h) % 2 == 0 else "b",
+        )
+        result = await execute_dialogue(
+            dialogue=dialogue,
+            outer_index=0,
+            pipeline_results=[],
+            run_id="t2",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=None,
+        )
+        assert runner._call_count == 5
+        assert result.output.rounds_completed == 5
+
+    @pytest.mark.asyncio
+    async def test_max_turns_default_from_max_rounds(self) -> None:
+        """未设 max_turns 时，默认 max_rounds × len(roles)。"""
+        runner = MockRunner(["ok"] * 100)
+        dialogue = Dialogue(
+            roles=[
+                Role(name="a", system_prompt="", prompt=lambda ctx: "p"),
+                Role(name="b", system_prompt="", prompt=lambda ctx: "p"),
+                Role(name="c", system_prompt="", prompt=lambda ctx: "p"),
+            ],
+            max_rounds=2,            # → max_turns = 2 × 3 = 6
+            next_speaker=lambda h: ["a", "b", "c"][len(h) % 3],
+        )
+        result = await execute_dialogue(
+            dialogue=dialogue,
+            outer_index=0,
+            pipeline_results=[],
+            run_id="t3",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=None,
+        )
+        assert runner._call_count == 6
+
+    @pytest.mark.asyncio
+    async def test_until_checked_after_each_turn(self) -> None:
+        """回合模式下 until 每次发言后检查，立即停止。"""
+        runner = MockRunner(["ok", "ok", "stop", "ok", "ok"])
+        dialogue = Dialogue(
+            roles=[
+                Role(name="a", system_prompt="", prompt=lambda ctx: "p"),
+                Role(name="b", system_prompt="", prompt=lambda ctx: "p"),
+            ],
+            max_turns=10,
+            next_speaker=lambda h: "a" if len(h) % 2 == 0 else "b",
+            until=lambda ctx: (
+                "stop" in (ctx.last_from("a") or "")
+                or "stop" in (ctx.last_from("b") or "")
+            ),
+        )
+        result = await execute_dialogue(
+            dialogue=dialogue,
+            outer_index=0,
+            pipeline_results=[],
+            run_id="t4",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=None,
+        )
+        assert runner._call_count == 3
+        assert result.output.rounds_completed == 3
+
+    @pytest.mark.asyncio
+    async def test_context_history_grows_per_turn(self) -> None:
+        """每次发言时 ctx.history 包含之前所有发言。"""
+        history_sizes: list[int] = []
+
+        def capture_prompt(ctx):
+            history_sizes.append(len(ctx.history))
+            return "p"
+
+        runner = MockRunner(["ok"] * 4)
+        dialogue = Dialogue(
+            roles=[
+                Role(name="a", system_prompt="", prompt=capture_prompt),
+                Role(name="b", system_prompt="", prompt=capture_prompt),
+            ],
+            max_turns=4,
+            next_speaker=lambda h: "a" if len(h) % 2 == 0 else "b",
+        )
+        await execute_dialogue(
+            dialogue=dialogue,
+            outer_index=0,
+            pipeline_results=[],
+            run_id="t5",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=None,
+        )
+        assert history_sizes == [0, 1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_task_index_format_turn_mode(self) -> None:
+        """回合模式 task_index 格式为 '{outer}.t{turn}'。"""
+        saved: list[str] = []
+
+        class StorageMock:
+            async def save_task_log(self, run_id, task_index, *args, **kwargs):
+                saved.append(task_index)
+
+        runner = MockRunner(["ok"] * 3)
+        dialogue = Dialogue(
+            roles=[
+                Role(name="a", system_prompt="", prompt=lambda ctx: "p"),
+                Role(name="b", system_prompt="", prompt=lambda ctx: "p"),
+            ],
+            max_turns=3,
+            next_speaker=lambda h: "a" if len(h) % 2 == 0 else "b",
+        )
+        await execute_dialogue(
+            dialogue=dialogue,
+            outer_index=1,
+            pipeline_results=[],
+            run_id="t6",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=None,
+            storage=StorageMock(),
+        )
+        assert saved == ["1.t0", "1.t1", "1.t2"]

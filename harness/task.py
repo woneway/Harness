@@ -205,13 +205,16 @@ class Role:
 
 @dataclass
 class Dialogue(BaseTask):
-    """多角色循环对话，每个角色维护独立 Claude session。
+    """多角色对话，支持两种模式：
 
-    执行流程：
-    1. 按 roles 顺序，每个角色依次发言（一轮）
-    2. 整轮结束后检查 until 条件
-    3. 达到 max_rounds 或 until 返回 True 时终止
-    4. 向 pipeline results 追加单个 Result，output 为 DialogueOutput
+    **轮次模式**（默认，next_speaker=None）：
+        按 roles 顺序每轮各发言一次，until 在每次发言后检查。
+        适合：专家小组各自陈述、每人都要发言一次的场景。
+
+    **回合模式**（设置 next_speaker）：
+        由 next_speaker(history) 动态决定每次谁发言，
+        until 在每次发言后检查，支持点名回应、随机发言顺序等。
+        适合：真正的辩论、角色互相点名、动态参与的场景。
 
     v1 限制：不支持嵌套在 Parallel 内部。
     """
@@ -220,6 +223,11 @@ class Dialogue(BaseTask):
     background: str = ""
     max_rounds: int = 3
     until: Callable[["DialogueContext"], bool] | None = None
+
+    # 回合模式专用：设置后启用动态发言顺序
+    next_speaker: Callable[[list["DialogueTurn"]], str] | None = None
+    # 回合模式最大发言次数；None 时默认 max_rounds × len(roles)
+    max_turns: int | None = None
 
 
 # Forward reference placeholder for type checking only
