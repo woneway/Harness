@@ -9,6 +9,11 @@
         Result, PipelineResult,
         TaskConfig,
         Memory,
+        # Runner 基类（自定义 runner 时继承）
+        AbstractRunner, RunnerResult,
+        # 内置 API runners
+        OpenAIRunner,
+        AnthropicRunner,
     )
 
     # PermissionMode 需从 harness.runners.claude_cli 单独导入
@@ -17,6 +22,9 @@
 
 from harness.harness import Harness
 from harness.memory import Memory
+from harness.runners.anthropic import AnthropicRunner
+from harness.runners.base import AbstractRunner, RunnerResult
+from harness.runners.openai import OpenAIRunner
 from harness.task import (
     Dialogue,
     FunctionTask,
@@ -45,4 +53,9 @@ __all__ = [
     "PipelineResult",
     "TaskConfig",
     "Memory",
+    # Runner
+    "AbstractRunner",
+    "RunnerResult",
+    "OpenAIRunner",
+    "AnthropicRunner",
 ]
