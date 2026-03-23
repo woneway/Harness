@@ -144,6 +144,30 @@ uv run python examples/video_pipeline/main.py           # LLMTask + Parallel[Pol
 uv run python examples/poker_debate/main.py             # 德扑五方辩论（Dialogue 回合模式）
 ```
 
+## 用 Claude Code 生成 Pipeline（可选）
+
+在 Harness 项目目录下启动 Claude Code，输入：
+
+```
+/generating-harness-pipelines
+```
+
+Claude 会引导你完成需求澄清 → pipeline 设计 → 代码生成的完整流程。
+
+**示例 prompt：**
+
+```
+帮我用 Harness 写一个 pipeline：
+
+需求：
+- 从 akshare 获取 A 股近 30 天涨跌幅 top 10 的股票数据
+- 让 Claude 分析这些数据，输出投资建议摘要
+- 把分析结果保存到 ./output/report_<日期>.md
+- 定时每天早上 8:30 自动运行
+
+项目路径：/path/to/my-project
+```
+
 ## CLI
 
 ```bash
