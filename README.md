@@ -2,6 +2,7 @@
 
 > AI-native 通用自动化流水线框架，内置 Claude Code runner
 
+[![PyPI](https://img.shields.io/pypi/v/harness-ai)](https://pypi.org/project/harness-ai/)
 [![Python](https://img.shields.io/badge/python-3.11+-blue)](https://python.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 
@@ -13,36 +14,52 @@
 - **Task 类型多态**：LLMTask / FunctionTask / ShellTask / PollingTask / Parallel，混合编排
 - **开箱即用**：SQLite 存储、APScheduler v4 调度、Telegram 通知，均有抽象接口可替换
 
-## 快速上手
+## 前置条件
 
-```python
-from harness import Harness, LLMTask, FunctionTask, ShellTask
+**必须先安装 [Claude Code CLI](https://docs.anthropic.com/en/claude-code)：**
 
-h = Harness(project_path=".")
-
-# 单次 LLM 调用
-result = await h.run("分析并修复代码质量问题")
-
-# 多步混合流水线
-results = await h.pipeline([
-    FunctionTask(fn=collect_data),
-    LLMTask("分析数据，给出优化建议"),
-    ShellTask(cmd="pytest tests/"),
-])
+```bash
+npm install -g @anthropic-ai/claude-code
+claude --version   # 验证安装成功
 ```
 
 ## 安装
 
 ```bash
-pip install harness-ai
+pip install harness-ai[cli]
 ```
 
 或从源码安装（开发模式）：
 
 ```bash
-git clone https://github.com/your-org/harness
-cd harness
-pip install -e ".[dev]"
+git clone https://github.com/woneway/Harness
+cd Harness
+pip install -e ".[dev,cli]"
+```
+
+## 快速上手
+
+所有 `harness` 调用必须在 `async` 函数中执行：
+
+```python
+import asyncio
+from harness import Harness, LLMTask, FunctionTask, ShellTask
+
+async def main():
+    h = Harness(project_path=".")
+
+    # 单次 LLM 调用
+    result = await h.run("分析并修复代码质量问题")
+    print(result.output)
+
+    # 多步混合流水线
+    results = await h.pipeline([
+        FunctionTask(fn=collect_data),
+        LLMTask("分析数据，给出优化建议"),
+        ShellTask(cmd="pytest tests/"),
+    ])
+
+asyncio.run(main())
 ```
 
 ## Task 类型
@@ -66,9 +83,12 @@ pip install -e ".[dev]"
 ## 示例
 
 ```bash
-python examples/code_stats.py          # 统计代码量
-python examples/analyze_harness.py     # 分析 → 优化 → 复盘
-python examples/research_report.py Clawith  # 联网调研报告
+# 克隆项目后在项目根目录运行
+uv run python examples/code_stats/main.py               # 统计代码量（FunctionTask + LLMTask + ShellTask）
+uv run python examples/analyze_harness/main.py          # 分析 → 优化 → 复盘（三阶段 pipeline）
+uv run python examples/research_report/main.py Clawith  # 联网调研报告（多 LLMTask + FunctionTask）
+uv run python examples/video_pipeline/main.py           # LLMTask + Parallel[PollingTask×2] + FunctionTask
+uv run python examples/poker_debate/main.py             # 德扑五方辩论（Dialogue 回合模式）
 ```
 
 ## CLI
