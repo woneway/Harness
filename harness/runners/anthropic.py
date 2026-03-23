@@ -18,6 +18,7 @@ from typing import Callable
 
 import httpx
 
+from harness.runners._http import raise_for_status, safe_schema_name
 from harness.runners.base import AbstractRunner, RunnerResult
 
 _API_URL = "https://api.anthropic.com/v1/messages"
@@ -108,10 +109,9 @@ class AnthropicRunner(AbstractRunner):
         return await self._complete(payload, headers)
 
     async def _complete(self, payload: dict, headers: dict) -> RunnerResult:
-        """非流式纯文本调用。"""
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.post(_API_URL, json=payload, headers=headers)
-            _raise_for_status(resp)
+            raise_for_status(resp, "Anthropic")
             data = resp.json()
 
         text = _extract_text(data)
@@ -124,9 +124,8 @@ class AnthropicRunner(AbstractRunner):
         headers: dict,
         output_schema_json: str,
     ) -> RunnerResult:
-        """使用 tool_use 强制返回符合 JSON schema 的结构化输出。"""
         schema = json.loads(output_schema_json)
-        tool_name = _safe_name(schema.get("title", "response"))
+        tool_name = safe_schema_name(schema.get("title", "response"))
 
         schema_payload = {
             **payload,
@@ -142,19 +141,18 @@ class AnthropicRunner(AbstractRunner):
 
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.post(_API_URL, json=schema_payload, headers=headers)
-            _raise_for_status(resp)
+            raise_for_status(resp, "Anthropic")
             data = resp.json()
 
-        # 从 tool_use content block 提取 JSON
         for block in data.get("content", []):
             if block.get("type") == "tool_use":
                 text = json.dumps(block.get("input", {}))
                 tokens = _count_tokens(data)
                 return RunnerResult(text=text, tokens_used=tokens, session_id=None)
 
-        # Fallback：未返回 tool_use（不应发生，但做保底）
-        text = _extract_text(data)
-        return RunnerResult(text=text, tokens_used=_count_tokens(data), session_id=None)
+        raise RuntimeError(
+            f"Anthropic tool_use response missing tool_use block: {data.get('content')}"
+        )
 
     async def _stream(
         self,
@@ -162,7 +160,6 @@ class AnthropicRunner(AbstractRunner):
         headers: dict,
         stream_callback: Callable[[str], None],
     ) -> RunnerResult:
-        """流式调用，逐 text_delta 回调。"""
         stream_payload = {**payload, "stream": True}
         full_text = ""
         input_tokens = 0
@@ -170,7 +167,7 @@ class AnthropicRunner(AbstractRunner):
 
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             async with client.stream("POST", _API_URL, json=stream_payload, headers=headers) as resp:
-                _raise_for_status(resp)
+                raise_for_status(resp, "Anthropic")
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: "):
                         continue
@@ -191,10 +188,7 @@ class AnthropicRunner(AbstractRunner):
                             text = delta.get("text", "")
                             if text:
                                 full_text += text
-                                try:
-                                    stream_callback(text)
-                                except Exception:
-                                    pass
+                                stream_callback(text)
 
                     elif etype == "message_delta":
                         usage = event.get("usage", {})
@@ -208,7 +202,6 @@ class AnthropicRunner(AbstractRunner):
 
 
 def _extract_text(data: dict) -> str:
-    """从非流式响应中提取文本内容。"""
     return "".join(
         block.get("text", "")
         for block in data.get("content", [])
@@ -219,20 +212,3 @@ def _extract_text(data: dict) -> str:
 def _count_tokens(data: dict) -> int:
     usage = data.get("usage", {})
     return usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
-
-
-def _safe_name(title: str) -> str:
-    """将 schema title 转为合法 tool name（仅字母数字下划线）。"""
-    return "".join(c if c.isalnum() or c == "_" else "_" for c in title)
-
-
-def _raise_for_status(resp: httpx.Response) -> None:
-    """抛出包含响应体的可读错误。"""
-    if resp.status_code >= 400:
-        try:
-            body = resp.text
-        except Exception:
-            body = "<unreadable>"
-        raise RuntimeError(
-            f"Anthropic API error {resp.status_code}: {body}"
-        )

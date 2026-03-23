@@ -57,15 +57,7 @@ def _classify_error(error: str) -> tuple[str, str]:
     if "403" in e or "forbidden" in e:
         return ("权限不足", "没有访问权限，请检查 API 配额或账户权限")
 
-    # 数据 / 代码类
-    if "keyerror" in e:
-        return ("KeyError", "字典键不存在，请检查数据结构")
-    if "typeerror" in e:
-        return ("TypeError", "类型不匹配，请检查函数参数或返回值类型")
-    if "valueerror" in e:
-        return ("ValueError", "数据值无效，请检查输入数据")
-    if "attributeerror" in e:
-        return ("AttributeError", "对象属性不存在，请检查数据结构")
+    # 文件 / 权限类
     if "filenotfounderror" in e or "no such file" in e:
         return ("文件不存在", "指定文件路径不存在，请检查路径是否正确")
     if "permissionerror" in e:

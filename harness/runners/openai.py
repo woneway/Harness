@@ -18,6 +18,7 @@ from typing import Callable
 
 import httpx
 
+from harness.runners._http import raise_for_status, safe_schema_name
 from harness.runners.base import AbstractRunner, RunnerResult
 
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
@@ -102,7 +103,7 @@ class OpenAIRunner(AbstractRunner):
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": _safe_name(schema.get("title", "response")),
+                    "name": safe_schema_name(schema.get("title", "response")),
                     "schema": schema,
                     "strict": True,
                 },
@@ -128,9 +129,8 @@ class OpenAIRunner(AbstractRunner):
         headers: dict,
         payload: dict,
     ) -> RunnerResult:
-        """非流式调用。"""
         resp = await client.post(url, json=payload, headers=headers)
-        _raise_for_status(resp)
+        raise_for_status(resp, "OpenAI")
         data = resp.json()
         text = data["choices"][0]["message"]["content"] or ""
         tokens = data.get("usage", {}).get("total_tokens", 0)
@@ -144,7 +144,6 @@ class OpenAIRunner(AbstractRunner):
         payload: dict,
         stream_callback: Callable[[str], None],
     ) -> RunnerResult:
-        """流式调用，逐 chunk 回调。"""
         stream_payload = {
             **payload,
             "stream": True,
@@ -154,7 +153,7 @@ class OpenAIRunner(AbstractRunner):
         tokens_used = 0
 
         async with client.stream("POST", url, json=stream_payload, headers=headers) as resp:
-            _raise_for_status(resp)
+            raise_for_status(resp, "OpenAI")
             async for line in resp.aiter_lines():
                 if not line.startswith("data: "):
                     continue
@@ -171,28 +170,10 @@ class OpenAIRunner(AbstractRunner):
                     content = delta.get("content") or ""
                     if content:
                         full_text += content
-                        try:
-                            stream_callback(content)
-                        except Exception:
-                            pass
+                        stream_callback(content)
                 if chunk.get("usage"):
                     tokens_used = chunk["usage"].get("total_tokens", 0)
 
         return RunnerResult(text=full_text, tokens_used=tokens_used, session_id=None)
 
 
-def _safe_name(title: str) -> str:
-    """将 schema title 转为 OpenAI json_schema name 要求的安全格式（仅字母数字下划线）。"""
-    return "".join(c if c.isalnum() or c == "_" else "_" for c in title)
-
-
-def _raise_for_status(resp: httpx.Response) -> None:
-    """抛出包含响应体的可读错误。"""
-    if resp.status_code >= 400:
-        try:
-            body = resp.text
-        except Exception:
-            body = "<unreadable>"
-        raise RuntimeError(
-            f"OpenAI API error {resp.status_code}: {body}"
-        )

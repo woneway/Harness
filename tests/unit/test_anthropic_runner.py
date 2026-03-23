@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from harness.runners.anthropic import AnthropicRunner, _safe_name
+from harness.runners.anthropic import AnthropicRunner
 
 
 # ---------------------------------------------------------------------------
@@ -272,18 +272,3 @@ async def test_http_error_raises():
             await runner.execute("x", system_prompt="", session_id=None)
 
 
-# ---------------------------------------------------------------------------
-# 测试：_safe_name
-# ---------------------------------------------------------------------------
-
-
-def test_safe_name_basic():
-    assert _safe_name("VideoScript") == "VideoScript"
-
-
-def test_safe_name_spaces():
-    assert _safe_name("Video Script") == "Video_Script"
-
-
-def test_safe_name_hyphens():
-    assert _safe_name("my-schema") == "my_schema"

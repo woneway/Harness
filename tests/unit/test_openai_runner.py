@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from harness.runners.openai import OpenAIRunner, _safe_name
+from harness.runners._http import safe_schema_name
+from harness.runners.openai import OpenAIRunner
 
 
 # ---------------------------------------------------------------------------
@@ -306,17 +307,17 @@ async def test_custom_base_url():
 
 
 # ---------------------------------------------------------------------------
-# 测试：_safe_name
+# 测试：safe_schema_name
 # ---------------------------------------------------------------------------
 
 
-def test_safe_name_basic():
-    assert _safe_name("MyResult") == "MyResult"
+def test_safe_schema_name_basic():
+    assert safe_schema_name("MyResult") == "MyResult"
 
 
-def test_safe_name_spaces():
-    assert _safe_name("My Result") == "My_Result"
+def test_safe_schema_name_spaces():
+    assert safe_schema_name("My Result") == "My_Result"
 
 
-def test_safe_name_special_chars():
-    assert _safe_name("my-result.v2") == "my_result_v2"
+def test_safe_schema_name_special_chars():
+    assert safe_schema_name("my-result.v2") == "my_result_v2"
