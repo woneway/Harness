@@ -136,3 +136,23 @@ class OutputSchemaError(Exception):
             f"Task {task_index} output schema validation failed: "
             f"expected {expected_type.__name__}, got {actual_type.__name__}"
         )
+
+
+class ResumeSchemaError(Exception):
+    """续跑时 output_schema 类无法导入，抛出此异常。
+
+    静默 fallback 到 dict 会导致后续 result.output.field 以 AttributeError
+    崩溃，且错误位置与根因相距甚远。提前显式报错更安全。
+
+    修复方式：
+      - 若类已改名/移动，更新代码后重新跑（不续跑），或
+      - 删除该 run 的数据库记录后从头跑。
+    """
+
+    def __init__(self, class_path: str) -> None:
+        self.class_path = class_path
+        super().__init__(
+            f"Cannot resume: output_schema class '{class_path}' could not be imported.\n"
+            f"The class may have been renamed or moved since the original run.\n"
+            f"Fix: ensure the class is importable at '{class_path}', or start a fresh run."
+        )

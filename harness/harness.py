@@ -11,7 +11,8 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 from harness._internal.deserialize import deserialize_output
-from harness._internal.exceptions import InvalidPipelineError, TaskFailedError
+from harness._internal.exceptions import InvalidPipelineError, ResumeSchemaError, TaskFailedError
+from harness._internal.task_index import TaskIndex
 from harness._internal.executor import (
     execute_function_task,
     execute_llm_task,
@@ -212,55 +213,48 @@ class Harness:
         resumed_results: list[Result] = []
 
         if resume_from is not None:
-            # 获取所有日志（含失败）用于 Parallel 原子性判断
+            # 获取所有日志（含失败）用于 Parallel/Dialogue 原子性判断
             all_prev_logs = await self._storage.get_task_logs(resume_from)
-            # 只取成功日志用于顺序步骤跳过
             success_prev_logs = [l for l in all_prev_logs if l["success"]]
 
-            # 顺序步骤：只有成功的才跳过
-            for log in success_prev_logs:
-                idx = log["task_index"]
-                if "." not in idx:
-                    skipped_indices.add(idx)
-
-            # Parallel 块 / Dialogue：必须所有子日志都成功才能跳过（原子性）。
-            # 用 task_type 区分：Dialogue 子日志的 task_type == "dialogue"，
-            # Parallel 子日志的 task_type 为 "llm"/"function"/"shell"/"polling"。
-            # 两种情况的跳过语义相同（全部成功→整体跳过），分开收集避免混淆。
+            # 顺序步骤：成功则跳过
+            # 子任务（Parallel/Dialogue child）：所有子任务都成功才整体跳过（原子性）
+            # task_type=="dialogue" 区分 Dialogue child 与 Parallel child
             parallel_outer: dict[str, list] = {}
             dialogue_outer: dict[str, list] = {}
+
             for log in all_prev_logs:
-                idx = log["task_index"]
-                if "." in idx:
-                    outer = idx.split(".")[0]
-                    if log.get("task_type") == "dialogue":
-                        dialogue_outer.setdefault(outer, []).append(log)
-                    else:
-                        parallel_outer.setdefault(outer, []).append(log)
+                parsed = TaskIndex.parse(log["task_index"])
+                if not parsed.is_child:
+                    if log["success"]:
+                        skipped_indices.add(log["task_index"])
+                else:
+                    bucket = (
+                        dialogue_outer
+                        if log.get("task_type") == "dialogue"
+                        else parallel_outer
+                    )
+                    bucket.setdefault(parsed.outer_key, []).append(log)
 
-            for outer, logs in parallel_outer.items():
+            for outer_key, logs in parallel_outer.items():
                 if all(l["success"] for l in logs):
-                    skipped_indices.add(outer)
-                # 否则 Parallel 块整体重跑，不加入 skipped_indices
+                    skipped_indices.add(outer_key)
 
-            for outer, logs in dialogue_outer.items():
+            for outer_key, logs in dialogue_outer.items():
                 if all(l["success"] for l in logs):
-                    skipped_indices.add(outer)
-                # 否则 Dialogue 整体重跑
+                    skipped_indices.add(outer_key)
 
-            # 构建续跑的初始 results（只含跳过的步骤的成功结果）
+            # 构建续跑初始 results（只含被跳过的顶层步骤的成功记录）
             for log in success_prev_logs:
-                idx = log["task_index"]
-                if idx in skipped_indices:
-                    task_type = log.get("task_type", "function")
-                    output_raw = log.get("output")
-                    schema_class_path = log.get("output_schema_class")
-                    deserialized = deserialize_output(output_raw, schema_class_path)
+                if log["task_index"] in skipped_indices:
                     resumed_results.append(
                         Result(
-                            task_index=idx,
-                            task_type=task_type,
-                            output=deserialized,
+                            task_index=log["task_index"],
+                            task_type=log.get("task_type", "function"),
+                            output=deserialize_output(
+                                log.get("output"),
+                                log.get("output_schema_class"),
+                            ),
                             raw_text=log.get("raw_text"),
                             tokens_used=log.get("tokens_used", 0),
                             duration_seconds=log.get("duration_seconds", 0.0),
@@ -298,7 +292,7 @@ class Harness:
 
         try:
             for outer_index, task in enumerate(tasks):
-                task_index = str(outer_index)
+                task_index = str(TaskIndex.sequential(outer_index))
 
                 # 跳过已成功的步骤（续跑）
                 if task_index in skipped_indices:
@@ -328,9 +322,9 @@ class Harness:
                     session_manager.mark_broken()
                     for r in sub_results:
                         # 从 task_index（如 "2.1"）解析子任务索引以获取 schema
-                        sub_idx_str = r.task_index.split(".", 1)[-1]
                         try:
-                            sub_task = task.tasks[int(sub_idx_str)]
+                            sub_child_int = TaskIndex.parse(r.task_index).par_child_int()
+                            sub_task = task.tasks[sub_child_int]
                             sub_schema_path = _schema_class_path(sub_task)
                         except (ValueError, IndexError):
                             sub_schema_path = None

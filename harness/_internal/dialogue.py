@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from harness.task import Result
 
 from harness._internal.exceptions import TaskFailedError
+from harness._internal.task_index import TaskIndex
 from harness.task import Dialogue, DialogueOutput, DialogueTurn, TaskConfig
 
 logger = logging.getLogger(__name__)
@@ -169,7 +170,7 @@ async def execute_dialogue(
         done = False
         for round_num in range(dialogue.max_rounds):
             for role_idx, role in enumerate(dialogue.roles):
-                task_index = f"{outer_index}.r{round_num}.{role_idx}"
+                task_index = str(TaskIndex.dialogue_round(outer_index, round_num, role_idx))
                 turn, turn_tokens = await _execute_turn(
                     role.name, task_index, round_num,
                     dialogue, history, pipeline_results,
@@ -201,7 +202,7 @@ async def execute_dialogue(
         max_turns = dialogue.max_turns or (dialogue.max_rounds * len(dialogue.roles))
         for turn_num in range(max_turns):
             next_role_name = dialogue.next_speaker(list(history))
-            task_index = f"{outer_index}.t{turn_num}"
+            task_index = str(TaskIndex.dialogue_turn(outer_index, turn_num))
 
             # 校验 next_speaker 返回值
             if next_role_name not in valid_role_names:

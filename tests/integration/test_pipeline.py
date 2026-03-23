@@ -7,9 +7,24 @@ from pathlib import Path
 
 import pytest
 
+from pydantic import BaseModel
+
 from harness import Harness, FunctionTask, ShellTask, TaskConfig
 from harness._internal.exceptions import TaskFailedError
 from harness.task import Parallel, PollingTask
+
+
+# ---------------------------------------------------------------------------
+# 模块级 Pydantic 模型（供 resume 反序列化测试使用）
+# 必须定义在模块顶层，importlib 才能通过 __qualname__ 重新导入
+# ---------------------------------------------------------------------------
+
+
+class _ResumeStepOutput(BaseModel):
+    """用于 TestResumeDeserialization 的测试 schema。"""
+
+    value: int
+    label: str
 
 
 def make_harness(tmp_path: Path, **kwargs) -> Harness:
@@ -289,26 +304,21 @@ class TestResumeFrom:
 class TestResumeDeserialization:
     @pytest.mark.asyncio
     async def test_resumed_result_output_is_model_instance(self, tmp_path: Path) -> None:
-        """续跑时，前序成功步骤的 output 应反序列化为 Pydantic 模型实例，而非 JSON 字符串。"""
-        from pydantic import BaseModel as _BM
+        """续跑时，前序成功步骤的 output 应反序列化为 Pydantic 模型实例，而非 JSON 字符串。
 
-        class StepOutput(_BM):
-            value: int
-            label: str
-
+        注意：output_schema 类必须定义在模块顶层，才能通过 importlib 在续跑时重新导入。
+        本地类（函数内定义）会触发 ResumeSchemaError，这是预期的正确行为。
+        """
         h = make_harness(tmp_path)
 
-        # 第一次跑：Task 0 成功产出 Pydantic 模型，Task 1 失败
-        task0_result: list = []
-
         def task0(results):
-            return StepOutput(value=42, label="hello")
+            return _ResumeStepOutput(value=42, label="hello")
 
         def task1_fail(results):
             raise RuntimeError("deliberate failure")
 
         tasks = [
-            FunctionTask(fn=task0, output_schema=StepOutput),
+            FunctionTask(fn=task0, output_schema=_ResumeStepOutput),
             FunctionTask(fn=task1_fail, config=TaskConfig(max_retries=0)),
         ]
 
@@ -320,16 +330,15 @@ class TestResumeDeserialization:
 
         assert failed_run_id is not None
 
-        # 续跑：Task 0 应跳过，resumed_results[0].output 应是 StepOutput 实例
+        # 续跑：Task 0 应跳过，resumed_results[0].output 应是 _ResumeStepOutput 实例
         def task1_ok(results):
-            # 核心验证：results[0].output 必须是 StepOutput 实例，否则这里崩溃
-            assert isinstance(results[0].output, StepOutput), (
-                f"Expected StepOutput, got {type(results[0].output)}: {results[0].output!r}"
+            assert isinstance(results[0].output, _ResumeStepOutput), (
+                f"Expected _ResumeStepOutput, got {type(results[0].output)}: {results[0].output!r}"
             )
-            return results[0].output.value + results[0].output.label
+            return str(results[0].output.value) + results[0].output.label
 
         tasks2 = [
-            FunctionTask(fn=task0, output_schema=StepOutput),
+            FunctionTask(fn=task0, output_schema=_ResumeStepOutput),
             FunctionTask(fn=task1_ok),
         ]
 

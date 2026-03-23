@@ -8,6 +8,7 @@ import pytest
 from pydantic import BaseModel
 
 from harness._internal.deserialize import _resolve_schema_class, deserialize_output
+from harness._internal.exceptions import ResumeSchemaError
 
 
 # ---------------------------------------------------------------------------
@@ -34,30 +35,30 @@ class TestResolveSchemaClass:
         assert cls is _SampleModel
 
     def test_resolve_schema_class_invalid_module(self) -> None:
-        """模块不存在时返回 None，不抛异常。"""
-        result = _resolve_schema_class("nonexistent.module.SomeClass")
-        assert result is None
+        """模块不存在时抛 ResumeSchemaError。"""
+        with pytest.raises(ResumeSchemaError) as exc_info:
+            _resolve_schema_class("nonexistent.module.SomeClass")
+        assert "nonexistent.module.SomeClass" in str(exc_info.value)
 
     def test_resolve_schema_class_invalid_attribute(self) -> None:
-        """模块存在但属性不存在时返回 None。"""
-        result = _resolve_schema_class("harness.task.NonExistentClass")
-        assert result is None
+        """模块存在但属性不存在时抛 ResumeSchemaError。"""
+        with pytest.raises(ResumeSchemaError):
+            _resolve_schema_class("harness.task.NonExistentClass")
 
     def test_resolve_schema_class_not_basemodel(self) -> None:
-        """目标类不是 BaseModel 子类时返回 None。"""
-        # str 不是 BaseModel 子类
-        result = _resolve_schema_class("builtins.str")
-        assert result is None
+        """目标类不是 BaseModel 子类时抛 ResumeSchemaError。"""
+        with pytest.raises(ResumeSchemaError):
+            _resolve_schema_class("builtins.str")
 
     def test_resolve_schema_class_empty_string(self) -> None:
-        """空字符串无法分割，返回 None。"""
-        result = _resolve_schema_class("")
-        assert result is None
+        """空字符串无法分割时抛 ResumeSchemaError。"""
+        with pytest.raises(ResumeSchemaError):
+            _resolve_schema_class("")
 
     def test_resolve_schema_class_no_dot(self) -> None:
-        """没有点号无法分割模块与类名，返回 None。"""
-        result = _resolve_schema_class("NoDotHere")
-        assert result is None
+        """没有点号无法分割模块与类名时抛 ResumeSchemaError。"""
+        with pytest.raises(ResumeSchemaError):
+            _resolve_schema_class("NoDotHere")
 
 
 # ---------------------------------------------------------------------------
@@ -88,19 +89,20 @@ class TestDeserializeOutput:
         assert result.name == "hello"
         assert result.value == 42
 
-    def test_deserialize_with_unavailable_schema(self) -> None:
-        """schema_class_path 指向不存在的类时，fallback 为 dict。"""
+    def test_deserialize_with_unavailable_schema_raises(self) -> None:
+        """schema_class_path 指向不存在的类时，抛 ResumeSchemaError（不再静默 fallback）。"""
         raw = json.dumps({"name": "hello", "value": 42})
-        result = deserialize_output(raw, "nonexistent.module.SomeModel")
-        assert isinstance(result, dict)
-        assert result["name"] == "hello"
-        assert result["value"] == 42
+        with pytest.raises(ResumeSchemaError) as exc_info:
+            deserialize_output(raw, "nonexistent.module.SomeModel")
+        assert "nonexistent.module.SomeModel" in str(exc_info.value)
 
-    def test_deserialize_with_unavailable_schema_invalid_json(self) -> None:
-        """schema_class_path 不可用且 JSON 解析失败时返回原始字符串。"""
-        raw = "not-json-string"
-        result = deserialize_output(raw, "nonexistent.module.SomeModel")
-        assert result == "not-json-string"
+    def test_deserialize_with_unavailable_schema_error_message(self) -> None:
+        """ResumeSchemaError 消息包含可操作的修复指引。"""
+        with pytest.raises(ResumeSchemaError) as exc_info:
+            deserialize_output("{}", "myapp.schemas.Gone")
+        msg = str(exc_info.value)
+        assert "myapp.schemas.Gone" in msg
+        assert "renamed" in msg or "moved" in msg or "importable" in msg
 
     def test_deserialize_with_no_schema_valid_json(self) -> None:
         """schema_class_path 为 None，raw_output 是合法 JSON 时返回解析结果。"""

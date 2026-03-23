@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from harness._internal.exceptions import InvalidPipelineError, TaskFailedError
+from harness._internal.task_index import TaskIndex
 from harness.task import (
     FunctionTask,
     LLMTask,
@@ -86,7 +87,7 @@ async def execute_parallel(
         task_types: list[str] = []
         coros = []
         for inner_index, task in enumerate(parallel.tasks):
-            task_index = f"{outer_index}.{inner_index}"
+            task_index = str(TaskIndex.parallel_child(outer_index, inner_index))
             task_indices.append(task_index)
             task_types.append(_task_type_str(task))
             coro = _execute_one(
@@ -142,7 +143,7 @@ async def _run_all_or_nothing_with_retry(
         # 每次尝试重新构建协程，避免复用已消耗的协程
         coros = []
         for inner_index, task in enumerate(parallel.tasks):
-            task_index = f"{outer_index}.{inner_index}"
+            task_index = str(TaskIndex.parallel_child(outer_index, inner_index))
             coro = _execute_one(
                 task,
                 task_index,
