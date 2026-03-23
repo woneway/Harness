@@ -38,6 +38,7 @@ async def execute_parallel(
     is_new_session: bool = False,
     harness_stream_callback: "Callable[[str], None] | None" = None,
     harness_raw_stream_callback: "Callable[[dict], None] | None" = None,
+    env_overrides: "dict[str, str] | None" = None,
 ) -> list[Result]:
     """并发执行 Parallel 块内的所有 Task。
 
@@ -77,6 +78,7 @@ async def execute_parallel(
             is_new_session=is_new_session,
             harness_stream_callback=harness_stream_callback,
             harness_raw_stream_callback=harness_raw_stream_callback,
+            env_overrides=env_overrides,
         )
     else:
         # best_effort：一次性构建协程并等待全部完成
@@ -101,6 +103,7 @@ async def execute_parallel(
                 is_new_session=is_new_session,
                 harness_stream_callback=harness_stream_callback,
                 harness_raw_stream_callback=harness_raw_stream_callback,
+                env_overrides=env_overrides,
             )
             coros.append(coro)
         return await _run_best_effort(coros, task_indices, task_types)
@@ -121,6 +124,7 @@ async def _run_all_or_nothing_with_retry(
     is_new_session: bool,
     harness_stream_callback: "Callable[[str], None] | None" = None,
     harness_raw_stream_callback: "Callable[[dict], None] | None" = None,
+    env_overrides: "dict[str, str] | None" = None,
 ) -> list[Result]:
     """all_or_nothing 策略：带整块重试上限（parallel.max_retries）的执行。
 
@@ -153,6 +157,7 @@ async def _run_all_or_nothing_with_retry(
                 is_new_session=is_new_session,
                 harness_stream_callback=harness_stream_callback,
                 harness_raw_stream_callback=harness_raw_stream_callback,
+                env_overrides=env_overrides,
             )
             coros.append(coro)
 
@@ -255,10 +260,12 @@ async def _execute_one(
     is_new_session: bool,
     harness_stream_callback: "Callable[[str], None] | None" = None,
     harness_raw_stream_callback: "Callable[[dict], None] | None" = None,
+    env_overrides: "dict[str, str] | None" = None,
 ) -> Result:
     """按任务类型派发到对应的 executor 函数。
 
     LLMTask 的流回调优先级：Task 级 > Harness 级。
+    LLMTask 使用独立的 SessionManager，避免并发竞争外部共享 session。
     """
     from harness._internal.executor import (
         execute_function_task,
@@ -266,6 +273,7 @@ async def _execute_one(
         execute_shell_task,
     )
     from harness._internal.polling import execute_polling
+    from harness._internal.session import SessionManager
 
     if isinstance(task, LLMTask):
         # 合并 Harness 级回调：Task 级优先，否则降级到 Harness 级
@@ -273,6 +281,10 @@ async def _execute_one(
         effective_raw_cb = task.raw_stream_callback or harness_raw_stream_callback
         if effective_cb is not task.stream_callback or effective_raw_cb is not task.raw_stream_callback:
             task = replace(task, stream_callback=effective_cb, raw_stream_callback=effective_raw_cb)
+        # Bug2 修复：每个并发 LLMTask 使用独立 session，避免多个任务竞争同一
+        # session_manager 导致 last-writer-wins 和潜在的 session 混乱。
+        # 外部 session_manager 不被修改；调用方在 Parallel 完成后统一 mark_broken。
+        local_session = SessionManager()
         return await execute_llm_task(
             task,
             task_index,
@@ -281,18 +293,22 @@ async def _execute_one(
             harness_system_prompt=harness_system_prompt,
             harness_runner=harness_runner,
             harness_config=harness_config,
-            session_manager=session_manager,
+            session_manager=local_session,
             memory_injection=memory_injection,
             storage=storage,
             is_new_session=is_new_session,
         )
     elif isinstance(task, FunctionTask):
         return await execute_function_task(
-            task, task_index, results, run_id, harness_config=harness_config
+            task, task_index, results, run_id,
+            harness_config=harness_config,
+            env_overrides=env_overrides,
         )
     elif isinstance(task, ShellTask):
         return await execute_shell_task(
-            task, task_index, results, run_id, harness_config=harness_config
+            task, task_index, results, run_id,
+            harness_config=harness_config,
+            env_overrides=env_overrides,
         )
     elif isinstance(task, PollingTask):
         return await execute_polling(

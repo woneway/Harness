@@ -185,10 +185,20 @@ class DialogueTurn:
 
 @dataclass
 class DialogueOutput:
-    """Dialogue 执行结果，作为 Result.output 存储。"""
+    """Dialogue 执行结果，作为 Result.output 存储。
+
+    Attributes:
+        turns: 所有发言记录，按时间顺序。
+        rounds_completed: 轮次模式下表示已完成（含部分）轮数；
+            回合模式下与 total_turns 相同（无"轮"的概念）。
+        total_turns: 所有模式下的实际发言总次数（len(turns)）。
+        final_speaker: 最后发言的角色名。
+        final_content: 最后发言的内容。
+    """
 
     turns: list[DialogueTurn]
     rounds_completed: int
+    total_turns: int     # 实际发言总次数，语义明确，不依赖模式
     final_speaker: str   # 最后发言的角色名
     final_content: str   # 最后发言的内容
 

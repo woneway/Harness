@@ -513,3 +513,180 @@ class TestTurnMode:
             storage=StorageMock(),
         )
         assert saved == ["1.t0", "1.t1", "1.t2"]
+
+
+# ---- 错误处理 ----
+
+from harness._internal.exceptions import TaskFailedError
+from harness.task import TaskConfig
+
+
+class FailingRunner(AbstractRunner):
+    """每次调用都抛异常的 runner。"""
+
+    def __init__(self, exc: Exception | None = None) -> None:
+        self._exc = exc or RuntimeError("runner exploded")
+
+    async def execute(self, prompt, *, system_prompt, session_id, **kwargs) -> RunnerResult:
+        raise self._exc
+
+
+class TestDialogueErrorHandling:
+    @pytest.mark.asyncio
+    async def test_prompt_callable_raises_task_failed_immediately(self) -> None:
+        """role.prompt 抛异常时应立即抛 TaskFailedError，不重试。"""
+        runner = MockRunner(["ok"] * 10)
+        call_count = [0]
+
+        def bad_prompt(ctx):
+            call_count[0] += 1
+            raise ValueError("bad prompt")
+
+        dialogue = Dialogue(
+            roles=[Role(name="a", system_prompt="", prompt=bad_prompt)],
+            max_rounds=3,
+        )
+        with pytest.raises(TaskFailedError) as exc_info:
+            await execute_dialogue(
+                dialogue=dialogue,
+                outer_index=0,
+                pipeline_results=[],
+                run_id="err-1",
+                harness_system_prompt="",
+                harness_runner=runner,
+                harness_config=None,
+            )
+        assert "prompt callable raised" in str(exc_info.value)
+        assert "bad prompt" in str(exc_info.value)
+        # prompt callable 失败不重试：只调用一次
+        assert call_count[0] == 1
+
+    @pytest.mark.asyncio
+    async def test_runner_failure_triggers_retry_then_task_failed(self) -> None:
+        """runner 失败时应重试 max_retries 次后抛 TaskFailedError。"""
+        dialogue = Dialogue(
+            roles=[Role(name="a", system_prompt="", prompt=lambda ctx: "p")],
+            max_rounds=1,
+            config=TaskConfig(max_retries=2, backoff_base=0.01),
+        )
+        with pytest.raises(TaskFailedError) as exc_info:
+            await execute_dialogue(
+                dialogue=dialogue,
+                outer_index=0,
+                pipeline_results=[],
+                run_id="err-2",
+                harness_system_prompt="",
+                harness_runner=FailingRunner(),
+                harness_config=None,
+            )
+        assert "runner exploded" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_runner_timeout_triggers_retry_then_task_failed(self) -> None:
+        """runner 超时时应重试后抛 TaskFailedError。"""
+        import asyncio as _asyncio
+
+        class SlowRunner(AbstractRunner):
+            async def execute(self, prompt, *, system_prompt, session_id, **kwargs):
+                await _asyncio.sleep(10)
+                return RunnerResult(text="ok", tokens_used=0, session_id=None)
+
+        dialogue = Dialogue(
+            roles=[Role(name="a", system_prompt="", prompt=lambda ctx: "p")],
+            max_rounds=1,
+            config=TaskConfig(timeout=1, max_retries=1, backoff_base=0.01),
+        )
+        with pytest.raises(TaskFailedError) as exc_info:
+            await execute_dialogue(
+                dialogue=dialogue,
+                outer_index=0,
+                pipeline_results=[],
+                run_id="err-3",
+                harness_system_prompt="",
+                harness_runner=SlowRunner(),
+                harness_config=None,
+            )
+        assert "timed out" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_runner_succeeds_on_retry(self) -> None:
+        """runner 第 1 次失败、第 2 次成功时，最终应返回成功结果。"""
+        attempt = [0]
+
+        class FlakyRunner(AbstractRunner):
+            async def execute(self, prompt, *, system_prompt, session_id, **kwargs):
+                attempt[0] += 1
+                if attempt[0] < 2:
+                    raise RuntimeError("flaky")
+                return RunnerResult(text="recovered", tokens_used=3, session_id=None)
+
+        dialogue = Dialogue(
+            roles=[Role(name="a", system_prompt="", prompt=lambda ctx: "p")],
+            max_rounds=1,
+            config=TaskConfig(max_retries=2, backoff_base=0.01),
+        )
+        result = await execute_dialogue(
+            dialogue=dialogue,
+            outer_index=0,
+            pipeline_results=[],
+            run_id="err-4",
+            harness_system_prompt="",
+            harness_runner=FlakyRunner(),
+            harness_config=None,
+        )
+        assert result.success is True
+        assert result.output.final_content == "recovered"
+
+
+# ---- next_speaker 校验 ----
+
+
+class TestNextSpeakerValidation:
+    @pytest.mark.asyncio
+    async def test_invalid_role_name_raises_task_failed(self) -> None:
+        """next_speaker 返回不存在的角色名时，应抛 TaskFailedError。"""
+        runner = MockRunner(["ok"] * 10)
+        dialogue = Dialogue(
+            roles=[
+                Role(name="a", system_prompt="", prompt=lambda ctx: "p"),
+                Role(name="b", system_prompt="", prompt=lambda ctx: "p"),
+            ],
+            max_turns=3,
+            next_speaker=lambda h: "nonexistent",  # 无效角色名
+        )
+        with pytest.raises(TaskFailedError) as exc_info:
+            await execute_dialogue(
+                dialogue=dialogue,
+                outer_index=0,
+                pipeline_results=[],
+                run_id="v-1",
+                harness_system_prompt="",
+                harness_runner=runner,
+                harness_config=None,
+            )
+        assert "invalid role name" in str(exc_info.value)
+        assert "nonexistent" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_valid_role_name_passes(self) -> None:
+        """next_speaker 返回有效角色名时，正常执行。"""
+        runner = MockRunner(["ok"] * 3)
+        dialogue = Dialogue(
+            roles=[
+                Role(name="alice", system_prompt="", prompt=lambda ctx: "p"),
+                Role(name="bob", system_prompt="", prompt=lambda ctx: "p"),
+            ],
+            max_turns=3,
+            next_speaker=lambda h: "alice" if len(h) % 2 == 0 else "bob",
+        )
+        result = await execute_dialogue(
+            dialogue=dialogue,
+            outer_index=0,
+            pipeline_results=[],
+            run_id="v-2",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=None,
+        )
+        assert result.success is True
+        assert len(result.output.turns) == 3

@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import uuid
-
 
 class SessionManager:
     """管理 pipeline 内的 Claude Code session ID。
 
     正常执行时所有 LLMTask 复用同一 session_id。
-    重试或续跑时生成新 session_id，后续 LLMTask 继续用新的。
+    重试或续跑时清空 session_id，让 Claude CLI 开启全新 session。
     """
 
     def __init__(self, initial_session_id: str | None = None) -> None:
@@ -25,11 +23,12 @@ class SessionManager:
         """Runner 执行后更新 session ID（从 RunnerResult 中获取）。"""
         if session_id is not None:
             self._session_id = session_id
+            self._broken = False
 
     def mark_broken(self) -> None:
-        """标记当前 session 已断开（触发新 session 生成）。"""
+        """标记当前 session 已断开，下次调用将开启全新 session。"""
         self._broken = True
-        self._session_id = str(uuid.uuid4())
+        self._session_id = None
 
     @property
     def is_broken(self) -> bool:
@@ -39,4 +38,4 @@ class SessionManager:
     def reset(self) -> None:
         """重置为全新 session（用于续跑场景）。"""
         self._broken = True
-        self._session_id = str(uuid.uuid4())
+        self._session_id = None

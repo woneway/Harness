@@ -26,21 +26,34 @@ async def execute_polling(
 
     config = _effective_config(task.config, harness_config)
 
-    last_error = ""
+    last_error = "Max retries exceeded"
     attempt = 0
 
     while attempt <= config.max_retries:
-        result = await _run_once(task, task_index, results, run_id, config)
+        # config.timeout 作为每次 attempt 的整体上界（含 submit + poll 循环）。
+        # task.timeout 是 _run_once 内部 poll 循环的专属 deadline。
+        # 若 config.timeout < task.timeout，asyncio.wait_for 优先触发。
+        try:
+            result, error = await asyncio.wait_for(
+                _run_once(task, task_index, results, run_id, config),
+                timeout=config.timeout,
+            )
+        except asyncio.TimeoutError:
+            result = None
+            error = (
+                f"polling attempt {attempt} timed out after {config.timeout}s "
+                "(TaskConfig.timeout)"
+            )
         if result is not None:
             return result
-        # _run_once 返回 None 表示失败，需要重试
+        last_error = error
         attempt += 1
         if attempt <= config.max_retries:
             wait = config.backoff_base ** (attempt - 1)
             await asyncio.sleep(wait)
 
     raise TaskFailedError(
-        run_id, task_index, "polling", "Max retries exceeded", partial_results=list(results)
+        run_id, task_index, "polling", last_error, partial_results=list(results)
     )
 
 
@@ -50,8 +63,8 @@ async def _run_once(
     results: list[Result],
     run_id: str,
     config: TaskConfig,
-) -> Result | None:
-    """执行一次 submit + poll 循环，成功返回 Result，失败返回 None。"""
+) -> tuple[Result | None, str]:
+    """执行一次 submit + poll 循环，成功返回 (Result, "")，失败返回 (None, error_msg)。"""
     from pydantic import ValidationError
 
     start_time = time.monotonic()
@@ -60,21 +73,21 @@ async def _run_once(
     try:
         handle: Any = task.submit_fn(results)
     except Exception as e:
-        return None  # submit 失败，触发重试
+        return None, f"submit_fn raised: {e}"
 
     # poll 循环
     deadline = time.monotonic() + task.timeout
 
     while True:
         if time.monotonic() > deadline:
-            return None  # 超时，触发重试
+            return None, f"polling timed out after {task.timeout}s"
 
         await asyncio.sleep(task.poll_interval)
 
         try:
             response = task.poll_fn(handle)
         except Exception as e:
-            return None  # poll 失败，触发重试
+            return None, f"poll_fn raised: {e}"
 
         # success_condition
         if task.success_condition(response):
@@ -84,12 +97,9 @@ async def _run_once(
             # output_schema 校验
             if task.output_schema is not None:
                 try:
-                    if isinstance(response, dict):
-                        output = task.output_schema.model_validate(response)
-                    else:
-                        output = task.output_schema.model_validate(response)
-                except (ValidationError, Exception):
-                    return None  # 校验失败，触发重试
+                    output = task.output_schema.model_validate(response)
+                except (ValidationError, Exception) as e:
+                    return None, f"output_schema validation failed: {e}"
 
             return Result(
                 task_index=task_index,
@@ -100,8 +110,8 @@ async def _run_once(
                 duration_seconds=duration,
                 success=True,
                 error=None,
-            )
+            ), ""
 
         # failure_condition
         if task.failure_condition is not None and task.failure_condition(response):
-            return None  # 生成失败，触发重试
+            return None, "failure_condition triggered"

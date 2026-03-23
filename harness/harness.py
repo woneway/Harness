@@ -223,20 +223,30 @@ class Harness:
                 if "." not in idx:
                     skipped_indices.add(idx)
 
-            # Parallel 块：必须所有子 task 都成功才能跳过（原子性）
+            # Parallel 块 / Dialogue：必须所有子日志都成功才能跳过（原子性）。
+            # 用 task_type 区分：Dialogue 子日志的 task_type == "dialogue"，
+            # Parallel 子日志的 task_type 为 "llm"/"function"/"shell"/"polling"。
+            # 两种情况的跳过语义相同（全部成功→整体跳过），分开收集避免混淆。
             parallel_outer: dict[str, list] = {}
+            dialogue_outer: dict[str, list] = {}
             for log in all_prev_logs:
                 idx = log["task_index"]
                 if "." in idx:
                     outer = idx.split(".")[0]
-                    if outer not in parallel_outer:
-                        parallel_outer[outer] = []
-                    parallel_outer[outer].append(log)
+                    if log.get("task_type") == "dialogue":
+                        dialogue_outer.setdefault(outer, []).append(log)
+                    else:
+                        parallel_outer.setdefault(outer, []).append(log)
 
             for outer, logs in parallel_outer.items():
                 if all(l["success"] for l in logs):
                     skipped_indices.add(outer)
                 # 否则 Parallel 块整体重跑，不加入 skipped_indices
+
+            for outer, logs in dialogue_outer.items():
+                if all(l["success"] for l in logs):
+                    skipped_indices.add(outer)
+                # 否则 Dialogue 整体重跑
 
             # 构建续跑的初始 results（只含跳过的步骤的成功结果）
             for log in success_prev_logs:
@@ -311,7 +321,11 @@ class Harness:
                         is_new_session=session_manager.is_broken,
                         harness_stream_callback=self._stream_callback,
                         harness_raw_stream_callback=self._raw_stream_callback,
+                        env_overrides=self._env_overrides or None,
                     )
+                    # Bug2 修复：并发 LLMTask 各自使用独立 session，完成后外部
+                    # session 已无法确定从哪个子 session 续跑，统一 mark_broken。
+                    session_manager.mark_broken()
                     for r in sub_results:
                         # 从 task_index（如 "2.1"）解析子任务索引以获取 schema
                         sub_idx_str = r.task_index.split(".", 1)[-1]

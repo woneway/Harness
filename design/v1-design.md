@@ -2,8 +2,8 @@
 
 > 通用自动化流水线框架，内置 Claude Code runner
 
-**状态：v1 已实现**（122 tests pass，2026-03-21）
-**设计确认日期：2026-03-21**
+**状态：v1 已实现**（206 tests pass，2026-03-22）
+**设计确认日期：2026-03-22**
 
 ---
 
@@ -38,7 +38,7 @@ Harness 是一个 **AI-native 的通用自动化流水线框架**。
 用户只需要了解 **Task 类型** 和 `Harness`。
 
 ```python
-from harness import Harness, LLMTask, FunctionTask, ShellTask, PollingTask, Parallel
+from harness import Harness, LLMTask, FunctionTask, ShellTask, PollingTask, Parallel, Dialogue, Role
 from pydantic import BaseModel
 
 class ScriptResult(BaseModel):
@@ -101,6 +101,7 @@ class Harness:
         raw_stream_callback: Callable[[dict], None] | None = None,  # 原始 event dict 回调
         # 两者互斥；同时设置时抛 ValueError
         default_config: TaskConfig = TaskConfig(),
+        env_overrides: dict[str, str] | None = None,  # 子进程环境变量覆写（空字符串表示删除）
     ):
         self._project_path = Path(project_path).resolve()
         self._storage_url = storage_url or (
@@ -113,7 +114,7 @@ class Harness:
         *,
         output_schema: type[BaseModel] | None = None,
         config: TaskConfig | None = None,
-    ) -> Result:
+    ) -> Result:  # pipeline() 的单 LLMTask 语法糖
         """pipeline() 的单 LLMTask 语法糖。"""
         result = await self.pipeline([
             LLMTask(prompt, output_schema=output_schema, config=config)
@@ -150,7 +151,7 @@ LLMTask.runner（显式指定）
 ### 3.2 Task 类型体系
 
 ```python
-PipelineStep = LLMTask | FunctionTask | ShellTask | PollingTask | Parallel
+PipelineStep = LLMTask | FunctionTask | ShellTask | PollingTask | Parallel | Dialogue
 
 # 公共基类（用户不直接实例化）
 @dataclass
@@ -232,6 +233,7 @@ class Parallel(BaseTask):
     error_policy: Literal["all_or_nothing", "best_effort"] = "all_or_nothing"
     # all_or_nothing：任一失败立刻取消其他，抛 TaskFailedError
     # best_effort：收集所有结果，失败的标记 success=False，不中断
+    max_retries: int = 2   # 整块 Parallel 的最大重试次数（all_or_nothing 策略生效）
 ```
 
 **`Parallel` 的 `task_index` 用字符串路径表示：**
@@ -242,6 +244,79 @@ class Parallel(BaseTask):
 **断点续跑语义：** Parallel 块视为原子单元。续跑时若该块未全部成功，整体重跑。v1 不支持 Parallel 块内部的局部续跑。
 
 **v1 不支持嵌套 `Parallel`**：`tasks` 类型不含 `Parallel`；框架在 `pipeline()` 入口做运行时校验，违反时抛 `InvalidPipelineError` 并给出清晰提示。
+
+#### Dialogue
+
+多角色对话，支持轮次模式和回合模式。v1 不支持嵌套在 Parallel 内部。
+
+```python
+@dataclass
+class DialogueTurn:
+    """一次角色发言记录。"""
+    round: int       # 轮次，从 0 开始（回合模式下为发言序号）
+    role_name: str
+    content: str
+
+@dataclass
+class DialogueOutput:
+    """Dialogue 的执行结果，作为 Result.output 存储。"""
+    turns: list[DialogueTurn]   # 所有发言，按时间顺序
+    rounds_completed: int       # 轮次模式：已完成轮数；回合模式：与 total_turns 相同
+    total_turns: int            # 所有模式下的实际发言总次数
+    final_speaker: str          # 最后发言的角色名
+    final_content: str          # 最后发言的内容
+
+@dataclass
+class Role:
+    """Dialogue 中的一个参与者。"""
+    name: str
+    system_prompt: str
+    prompt: Callable[["DialogueContext"], str]  # 动态生成发言内容
+    runner: AbstractRunner | None = None        # None 时继承 Harness 默认 runner
+
+@dataclass
+class Dialogue(BaseTask):
+    roles: list[Role]
+    background: str = ""         # 注入所有角色 system_prompt 前的背景信息
+    max_rounds: int = 3          # 轮次模式的最大轮数；回合模式下用于计算默认 max_turns
+    until: Callable[["DialogueContext"], bool] | None = None  # 提前终止条件
+    # 回合模式专用：
+    next_speaker: Callable[[list["DialogueTurn"]], str] | None = None  # None = 轮次模式
+    max_turns: int | None = None  # None 时默认 max_rounds × len(roles)
+```
+
+**两种模式：**
+
+| 模式 | 触发条件 | 发言顺序 | 适用场景 |
+|------|---------|---------|---------|
+| **轮次模式**（默认） | `next_speaker=None` | 按 `roles` 列表循环 | 专家小组各自陈述、每人轮流发言 |
+| **回合模式** | 设置 `next_speaker` | `next_speaker(history)` 动态决定 | 真正的辩论、角色互相点名 |
+
+**`DialogueContext`**（`role.prompt` 的参数）：
+
+```python
+@dataclass
+class DialogueContext:
+    round: int                      # 当前轮次（从 0 开始）
+    role_name: str                  # 当前发言角色名
+    background: str                 # Dialogue.background
+    history: list[DialogueTurn]     # 本次发言前的所有历史
+    pipeline_results: list[Result]  # 上游 pipeline 结果
+
+    def last_from(self, role_name: str) -> str | None: ...  # 获取指定角色最近发言
+    def all_from(self, role_name: str) -> list[str]: ...    # 获取指定角色所有发言
+```
+
+**Dialogue 的 `task_index` 格式：**
+- 轮次模式：`"{outer}.r{round}.{role_index}"`（如 `"2.r0.1"`）
+- 回合模式：`"{outer}.t{turn}"`（如 `"2.t3"`）
+
+**Dialogue 错误处理：**
+- `role.prompt(ctx)` 抛异常：不重试，直接抛 `TaskFailedError`
+- `runner.execute()` 失败/超时：按 `TaskConfig.max_retries` 重试
+- `next_speaker` 返回无效角色名：立即抛 `TaskFailedError`（包含有效名称列表提示）
+
+**session 策略：** 每个 Role 独立维护自己的 session，实现角色间上下文隔离。
 
 ### 3.3 向后兼容
 
@@ -355,10 +430,10 @@ final_system_prompt =
 @dataclass(frozen=True)
 class Result:
     task_index: str                  # 顺序步骤："0","1","2"；Parallel 子任务："2.0","2.1"
-    task_type: Literal["llm", "function", "shell", "polling"]
-    output: BaseModel | str | Any    # LLMTask: BaseModel 或 str；其他: fn 返回值 / stdout / 最终 poll 结果
-    raw_text: str | None             # LLMTask: Claude 原始输出；其他: None 或 stdout
-    tokens_used: int                 # 非 LLM Task 为 0
+    task_type: Literal["llm", "function", "shell", "polling", "dialogue"]
+    output: BaseModel | str | Any    # LLMTask: BaseModel 或 str；Dialogue: DialogueOutput；其他: fn 返回值 / stdout
+    raw_text: str | None             # LLMTask: Claude 原始输出；Dialogue: 最后发言内容；其他: None 或 stdout
+    tokens_used: int                 # 非 LLM Task 为 0（Dialogue 累计所有发言 tokens）
     duration_seconds: float
     success: bool
     error: str | None
@@ -435,11 +510,14 @@ harness runs --failed  # 只看失败的
 | FunctionTask | fn 抛出异常 |
 | ShellTask | 非零退出码 / 超时 |
 | PollingTask | submit_fn 异常 / failure_condition 触发 / 超时 |
+| Dialogue（单次发言） | runner.execute() 异常 / 超时 |
 
 | 情况 | 处理 |
 |------|------|
 | LLMTask output_schema 校验失败 | 重试，prompt 追加错误信息 |
 | LLMTask prompt Callable 抛异常 | 不重试，直接抛 TaskFailedError |
+| Dialogue role.prompt() 抛异常 | 不重试，直接抛 TaskFailedError |
+| Dialogue next_speaker 返回无效角色名 | 不重试，直接抛 TaskFailedError |
 | 超过 max_retries | 抛 TaskFailedError |
 | Parallel 内 Task 失败（all_or_nothing）| 取消其余，抛 TaskFailedError |
 
@@ -594,10 +672,11 @@ claude
   --include-partial-messages
   --system-prompt <system_prompt>
   [--json-schema <schema>]
-  [--session-id <id>]
-  [--resume <id>]
+  [--resume <session_id>]   # 复用已有 session（新建 session 时省略此参数）
   -p <prompt>
 ```
+
+> **注意**：Claude CLI 使用 `--resume <id>` 复用 session，不使用 `--session-id`。
 
 **设计决策：**
 - asyncio.create_subprocess_exec，非阻塞
@@ -618,12 +697,14 @@ claude
 ```
 harness/
   __init__.py          # 公开 API：Harness, LLMTask, FunctionTask, ShellTask,
-                       #           PollingTask, Parallel, Task（LLMTask 别名）,
+                       #           PollingTask, Parallel, Dialogue, Role,
+                       #           Task（LLMTask 已废弃别名，v2 移除）,
                        #           Result, PipelineResult, TaskConfig, Memory
                        #           （PermissionMode 从 harness.runners.claude_cli 导入）
 
   harness.py           # Harness 主类
   task.py              # 所有 Task 类型 + TaskConfig + Result + PipelineResult
+                       # 含 DialogueTurn, DialogueOutput, Role, Dialogue
   memory.py            # Memory
 
   runners/
@@ -648,6 +729,7 @@ harness/
     executor.py        # Task 派发 + 重试 + session 管理 + prompt 注入兜底
     parallel.py        # Parallel 执行逻辑（asyncio.gather）
     polling.py         # PollingTask 轮询逻辑
+    dialogue.py        # Dialogue 多角色执行 + DialogueContext
     stream_parser.py   # stream-json 逐行解析
     session.py         # SessionManager
     exceptions.py      # TaskFailedError, ClaudeNotFoundError, ...
@@ -703,6 +785,16 @@ await h.start()
 
 ## 十五、实现状态（v1 已完成）
 
-所有模块已实现，122 tests pass。详细实现记录见 `design/PLAN.md`（历史存档）。
+所有模块已实现，206 tests pass（2026-03-22）。详细实现记录见 `design/PLAN.md`（历史存档）。
 
-**已实现：** `_internal/`（exceptions, stream_parser, session, executor, parallel, polling）、`runners/`（base, claude_cli, agent_leader）、`storage/`（models, sql）、`task.py`、`memory.py`、`harness.py`、`scheduler/`、`notifier/`、`cli.py`
+**已实现：** `_internal/`（exceptions, stream_parser, session, executor, parallel, polling, dialogue）、`runners/`（base, claude_cli, agent_leader）、`storage/`（models, sql）、`task.py`（含 Dialogue/Role/DialogueTurn/DialogueOutput）、`memory.py`、`harness.py`、`scheduler/`、`notifier/`、`cli.py`
+
+**v1 实现与原始设计的主要差异（均已在本文档同步）：**
+
+| 项目 | 原设计 | 实际实现 |
+|------|--------|---------|
+| CLI session 参数 | 文档误写 `--session-id` | 实际为 `--resume <id>` |
+| Task 类型 | 5 种（LLM/Function/Shell/Polling/Parallel） | 6 种，新增 `Dialogue` |
+| `__init__.py` 导出 | 未含 Dialogue/Role | 已导出 `Dialogue`, `Role` |
+| `env_overrides` | 未设计 | Harness 构造函数新增，透传给子进程 |
+| Parallel.max_retries | 未设计 | 独立于 TaskConfig 的整块重试次数 |

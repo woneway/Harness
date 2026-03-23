@@ -456,3 +456,115 @@ class TestDialoguePipelineIntegration:
         ])
         assert call_count == 2  # 只跑了 1 轮
         assert pr.results[0].output.rounds_completed == 1
+
+    @pytest.mark.asyncio
+    async def test_dialogue_turn_mode_in_pipeline(self, tmp_path: Path, mock_runner) -> None:
+        """回合模式：next_speaker 动态决定发言顺序，total_turns 正确。"""
+        h = Harness(str(tmp_path), runner=mock_runner)
+        patch_storage(h, make_mock_storage())
+
+        order = ["a", "b", "a", "b", "a"]
+        pr = await h.pipeline([
+            Dialogue(
+                roles=[
+                    Role(name="a", system_prompt="", prompt=lambda ctx: "p"),
+                    Role(name="b", system_prompt="", prompt=lambda ctx: "p"),
+                ],
+                max_turns=5,
+                next_speaker=lambda h: order[len(h)],
+            )
+        ])
+        out = pr.results[0].output
+        assert isinstance(out, DialogueOutput)
+        assert out.total_turns == 5
+        assert [t.role_name for t in out.turns] == order
+        # 回合模式下 rounds_completed == total_turns
+        assert out.rounds_completed == 5
+
+    @pytest.mark.asyncio
+    async def test_dialogue_prompt_callable_raises_propagates(self, tmp_path: Path, mock_runner) -> None:
+        """role.prompt 抛异常时，pipeline 应抛 TaskFailedError。"""
+        from harness._internal.exceptions import TaskFailedError as _TFE
+
+        h = Harness(str(tmp_path), runner=mock_runner)
+        patch_storage(h, make_mock_storage())
+
+        with pytest.raises(_TFE) as exc_info:
+            await h.pipeline([
+                Dialogue(
+                    roles=[
+                        Role(
+                            name="bad",
+                            system_prompt="",
+                            prompt=lambda ctx: (_ for _ in ()).throw(ValueError("bad prompt")),
+                        )
+                    ],
+                    max_rounds=1,
+                )
+            ])
+        assert "prompt callable raised" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_dialogue_invalid_next_speaker_propagates(self, tmp_path: Path, mock_runner) -> None:
+        """next_speaker 返回无效角色名时，pipeline 应抛 TaskFailedError。"""
+        from harness._internal.exceptions import TaskFailedError as _TFE
+
+        h = Harness(str(tmp_path), runner=mock_runner)
+        patch_storage(h, make_mock_storage())
+
+        with pytest.raises(_TFE) as exc_info:
+            await h.pipeline([
+                Dialogue(
+                    roles=[
+                        Role(name="alice", system_prompt="", prompt=lambda ctx: "p"),
+                    ],
+                    max_turns=3,
+                    next_speaker=lambda h: "nonexistent",
+                )
+            ])
+        assert "invalid role name" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_dialogue_pipeline_results_passed_to_context(self, tmp_path: Path, mock_runner) -> None:
+        """pipeline_results 正确传递到 DialogueContext 中。"""
+        h = Harness(str(tmp_path), runner=mock_runner)
+        patch_storage(h, make_mock_storage())
+
+        captured_results: list = []
+
+        def capture_prompt(ctx):
+            captured_results.append(list(ctx.pipeline_results))
+            return "p"
+
+        pr = await h.pipeline([
+            FunctionTask(fn=lambda r: "upstream_data"),
+            Dialogue(
+                roles=[Role(name="a", system_prompt="", prompt=capture_prompt)],
+                max_rounds=1,
+            ),
+        ])
+        assert len(captured_results) == 1
+        assert len(captured_results[0]) == 1
+        assert captured_results[0][0].output == "upstream_data"
+
+    @pytest.mark.asyncio
+    async def test_dialogue_tokens_summed_in_pipeline_result(self, tmp_path: Path) -> None:
+        """Dialogue 的 tokens_used 应为所有发言的累计值，体现在 PipelineResult.total_tokens 中。"""
+        class TokenRunner(AbstractRunner):
+            async def execute(self, prompt, *, system_prompt, session_id, **kwargs):
+                return RunnerResult(text="ok", tokens_used=10, session_id=None)
+
+        h = Harness(str(tmp_path), runner=TokenRunner())
+        patch_storage(h, make_mock_storage())
+
+        pr = await h.pipeline([
+            Dialogue(
+                roles=[
+                    Role(name="a", system_prompt="", prompt=lambda ctx: "p"),
+                    Role(name="b", system_prompt="", prompt=lambda ctx: "p"),
+                ],
+                max_rounds=3,  # 3 轮 × 2 角色 × 10 tokens = 60
+            )
+        ])
+        assert pr.results[0].tokens_used == 60
+        assert pr.total_tokens == 60

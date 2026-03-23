@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -11,7 +13,10 @@ if TYPE_CHECKING:
     from harness.storage.base import StorageProtocol
     from harness.task import Result
 
+from harness._internal.exceptions import TaskFailedError
 from harness.task import Dialogue, DialogueOutput, DialogueTurn, TaskConfig
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,8 +53,13 @@ async def _execute_turn(
     harness_runner: "AbstractRunner",
     storage: "StorageProtocol | None",
     run_id: str,
-) -> "DialogueTurn":
-    """执行单次角色发言，更新 session，持久化，返回 DialogueTurn。"""
+    config: TaskConfig,
+) -> "tuple[DialogueTurn, int]":
+    """执行单次角色发言，含超时与重试，更新 session，持久化，返回 (DialogueTurn, tokens)。
+
+    Raises:
+        TaskFailedError: prompt callable 抛异常（不重试），或 runner 超过最大重试次数。
+    """
     role_map = {r.name: r for r in dialogue.roles}
     role = role_map[role_name]
 
@@ -60,7 +70,15 @@ async def _execute_turn(
         history=list(history),
         pipeline_results=list(pipeline_results),
     )
-    prompt_text = role.prompt(ctx)
+
+    # prompt callable 异常：不重试，直接抛 TaskFailedError
+    try:
+        prompt_text = role.prompt(ctx)
+    except Exception as e:
+        raise TaskFailedError(
+            run_id, task_index, "dialogue",
+            f"Role '{role_name}' prompt callable raised: {e}",
+        )
 
     system_parts = []
     if dialogue.background:
@@ -72,28 +90,50 @@ async def _execute_turn(
     merged_system = "\n\n".join(system_parts)
 
     runner = role.runner or harness_runner
-    runner_result = await runner.execute(
-        prompt_text,
-        system_prompt=merged_system,
-        session_id=role_sessions[role_name],
-    )
-    if runner_result.session_id:
-        role_sessions[role_name] = runner_result.session_id
+    last_error = ""
+    attempt = 0
 
-    turn = DialogueTurn(round=round_or_turn, role_name=role_name, content=runner_result.text)
+    while attempt <= config.max_retries:
+        try:
+            runner_result = await asyncio.wait_for(
+                runner.execute(
+                    prompt_text,
+                    system_prompt=merged_system,
+                    session_id=role_sessions[role_name],
+                ),
+                timeout=config.timeout,
+            )
+        except asyncio.TimeoutError:
+            last_error = f"Turn {task_index} timed out after {config.timeout}s"
+            logger.warning(last_error)
+        except Exception as e:
+            last_error = str(e)
+            logger.warning("Turn %s attempt %d failed: %s", task_index, attempt, e)
+        else:
+            if runner_result.session_id:
+                role_sessions[role_name] = runner_result.session_id
 
-    if storage is not None:
-        await storage.save_task_log(
-            run_id, task_index, "dialogue",
-            output=runner_result.text,
-            output_schema_class=None,
-            raw_text=runner_result.text,
-            tokens_used=runner_result.tokens_used,
-            duration_seconds=0.0,
-            success=True,
-            error=None,
-        )
-    return turn
+            turn = DialogueTurn(round=round_or_turn, role_name=role_name, content=runner_result.text)
+
+            if storage is not None:
+                await storage.save_task_log(
+                    run_id, task_index, "dialogue",
+                    output=runner_result.text,
+                    output_schema_class=None,
+                    raw_text=runner_result.text,
+                    tokens_used=runner_result.tokens_used,
+                    duration_seconds=0.0,
+                    success=True,
+                    error=None,
+                )
+            return turn, runner_result.tokens_used
+
+        attempt += 1
+        if attempt <= config.max_retries:
+            wait = config.backoff_base ** (attempt - 1)
+            await asyncio.sleep(wait)
+
+    raise TaskFailedError(run_id, task_index, "dialogue", last_error)
 
 
 async def execute_dialogue(
@@ -117,10 +157,12 @@ async def execute_dialogue(
     """
     from harness.task import Result
 
+    config = dialogue.config or harness_config or TaskConfig()
     start_time = time.monotonic()
     role_sessions: dict[str, str | None] = {role.name: None for role in dialogue.roles}
     history: list[DialogueTurn] = []
     rounds_completed = 0
+    total_tokens = 0
 
     if dialogue.next_speaker is None:
         # ── 轮次模式 ──
@@ -128,13 +170,14 @@ async def execute_dialogue(
         for round_num in range(dialogue.max_rounds):
             for role_idx, role in enumerate(dialogue.roles):
                 task_index = f"{outer_index}.r{round_num}.{role_idx}"
-                turn = await _execute_turn(
+                turn, turn_tokens = await _execute_turn(
                     role.name, task_index, round_num,
                     dialogue, history, pipeline_results,
                     role_sessions, harness_system_prompt, harness_runner,
-                    storage, run_id,
+                    storage, run_id, config,
                 )
                 history.append(turn)
+                total_tokens += turn_tokens
 
                 # until 在每次发言后立即检查
                 if dialogue.until is not None:
@@ -154,17 +197,28 @@ async def execute_dialogue(
                 break
     else:
         # ── 回合模式 ──
+        valid_role_names = {r.name for r in dialogue.roles}
         max_turns = dialogue.max_turns or (dialogue.max_rounds * len(dialogue.roles))
         for turn_num in range(max_turns):
             next_role_name = dialogue.next_speaker(list(history))
             task_index = f"{outer_index}.t{turn_num}"
-            turn = await _execute_turn(
+
+            # 校验 next_speaker 返回值
+            if next_role_name not in valid_role_names:
+                raise TaskFailedError(
+                    run_id, task_index, "dialogue",
+                    f"next_speaker returned invalid role name: '{next_role_name}'. "
+                    f"Valid names: {sorted(valid_role_names)}",
+                )
+
+            turn, turn_tokens = await _execute_turn(
                 next_role_name, task_index, turn_num,
                 dialogue, history, pipeline_results,
                 role_sessions, harness_system_prompt, harness_runner,
-                storage, run_id,
+                storage, run_id, config,
             )
             history.append(turn)
+            total_tokens += turn_tokens
             rounds_completed = turn_num + 1
 
             # until 在每次发言后检查
@@ -180,6 +234,25 @@ async def execute_dialogue(
                     break
 
     duration = time.monotonic() - start_time
+
+    if not history:
+        return Result(
+            task_index=str(outer_index),
+            task_type="dialogue",
+            output=DialogueOutput(
+                turns=[],
+                rounds_completed=0,
+                total_turns=0,
+                final_speaker="",
+                final_content="",
+            ),
+            raw_text="",
+            tokens_used=0,
+            duration_seconds=duration,
+            success=True,
+            error=None,
+        )
+
     final_turn = history[-1]
     return Result(
         task_index=str(outer_index),
@@ -187,11 +260,12 @@ async def execute_dialogue(
         output=DialogueOutput(
             turns=history,
             rounds_completed=rounds_completed,
+            total_turns=len(history),
             final_speaker=final_turn.role_name,
             final_content=final_turn.content,
         ),
         raw_text=final_turn.content,
-        tokens_used=0,
+        tokens_used=total_tokens,
         duration_seconds=duration,
         success=True,
         error=None,

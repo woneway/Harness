@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 from typing import TYPE_CHECKING, Any, Callable
+
+logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel, ValidationError
 
@@ -87,9 +90,9 @@ async def execute_llm_task(
     # 解析 prompt
     try:
         if callable(task.prompt):
-            prompt_text = task.prompt(results)
+            base_prompt_text = task.prompt(results)
         else:
-            prompt_text = task.prompt
+            base_prompt_text = task.prompt
     except Exception as e:
         # Callable prompt 抛异常：不重试，直接抛 TaskFailedError
         raise TaskFailedError(
@@ -104,8 +107,18 @@ async def execute_llm_task(
     start_time = time.monotonic()
     last_error: str = ""
     attempt = 0
+    last_parse_error: str | None = None
 
     while attempt <= config.max_retries:
+        # schema 校验失败时将错误提示追加到 base prompt（每次只保留最近一次）
+        prompt_text = base_prompt_text
+        if last_parse_error is not None:
+            prompt_text = (
+                base_prompt_text
+                + f"\n\n[Previous attempt failed schema validation: {last_parse_error}. "
+                "Please respond with valid JSON matching the schema.]"
+            )
+
         # session 断开时注入前序上下文（只在进入新 session 的第一次调用时注入）
         current_prompt = prompt_text
         if is_new_session and storage is not None:
@@ -149,13 +162,8 @@ async def execute_llm_task(
                     output = task.output_schema.model_validate_json(result_obj.text)
                 except (ValidationError, Exception) as e:
                     parse_error = str(e)
+                    last_parse_error = parse_error
                     last_error = f"Output schema validation failed: {parse_error}"
-                    # 追加错误信息到 prompt 重试
-                    prompt_text = (
-                        prompt_text
-                        + f"\n\n[Previous attempt failed schema validation: {parse_error}. "
-                        "Please respond with valid JSON matching the schema.]"
-                    )
 
             if parse_error is None:
                 return Result(
@@ -275,21 +283,27 @@ async def execute_shell_task(
         raise TaskFailedError(run_id, task_index, "shell", f"cmd callable raised: {e}")
 
     # 构建子进程环境变量
-    if env_overrides:
-        cmd_env = os.environ.copy() if task.env is None else dict(task.env)
-        for key, val in env_overrides.items():
+    # task.env 视为对父进程环境的覆写（overlay），而非完全替换。
+    # 这样 task.env={"MY_VAR": "x"} 不会丢失 PATH 等继承变量。
+    # env_overrides（Harness 级）始终在最后应用，优先级最高。
+    if env_overrides or task.env is not None:
+        cmd_env = os.environ.copy()
+        if task.env is not None:
+            cmd_env.update(task.env)
+        for key, val in (env_overrides or {}).items():
             if val == "":
                 cmd_env.pop(key, None)
             else:
                 cmd_env[key] = val
     else:
-        cmd_env = task.env  # None means inherit from process
+        cmd_env = None  # inherit from process
 
     start_time = time.monotonic()
     last_error = ""
     attempt = 0
 
     while attempt <= config.max_retries:
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.wait_for(
                 asyncio.create_subprocess_shell(
@@ -306,6 +320,12 @@ async def execute_shell_task(
             )
         except asyncio.TimeoutError:
             last_error = f"ShellTask {task_index} timed out after {config.timeout}s"
+            if proc is not None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
         except Exception as e:
             last_error = str(e)
         else:
@@ -341,7 +361,7 @@ def _emit_separator(
 ) -> None:
     """输出每个 Task 执行前的分隔标识。"""
     separator = f"=== Task {task_index} [{task_type}] ==="
-    print(separator)
+    logger.info(separator)
     if stream_callback is not None:
         try:
             stream_callback(separator + "\n")

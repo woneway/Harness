@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class Base(DeclarativeBase):
@@ -21,7 +25,7 @@ class Run(Base):
     project_path: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     started_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow
+        DateTime, nullable=False, default=_utcnow
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
@@ -52,5 +56,5 @@ class TaskLog(Base):
     success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow
+        DateTime, nullable=False, default=_utcnow
     )
