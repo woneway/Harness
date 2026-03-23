@@ -11,7 +11,7 @@
 声明你的流水线，框架负责可靠执行、记录、重试、调度、通知。
 
 - **Claude Code runner 优先**：调用 Claude Code CLI 子进程，完整工具链 + bypassPermissions + session 持久化
-- **Task 类型多态**：LLMTask / FunctionTask / ShellTask / PollingTask / Parallel，混合编排
+- **Task 类型多态**：LLMTask / FunctionTask / ShellTask / PollingTask / Parallel / Dialogue，混合编排
 - **开箱即用**：SQLite 存储、APScheduler v4 调度、Telegram 通知，均有抽象接口可替换
 
 ## 前置条件
@@ -71,6 +71,59 @@ asyncio.run(main())
 | `ShellTask` | 执行 Shell 命令 |
 | `PollingTask` | 提交异步任务后轮询（视频生成、TTS 等） |
 | `Parallel` | 并发执行多个 Task |
+| `Dialogue` | 多角色辩论循环（多智能体交互） |
+
+## Dialogue — 多角色辩论
+
+让多个 AI 角色轮流发言，适用于多视角分析、辩论、模拟对话等场景：
+
+```python
+from harness import Harness, Dialogue, Role
+
+async def main():
+    h = Harness(project_path=".")
+
+    result = await h.run(
+        Dialogue(
+            roles=[
+                Role(name="乐观派", system_prompt="你总是从积极角度分析问题"),
+                Role(name="批评派", system_prompt="你专注于找出潜在风险和缺陷"),
+                Role(name="中立派", system_prompt="你综合各方观点给出平衡建议"),
+            ],
+            topic="评估：用 AI 替代人工客服的利与弊",
+            rounds=2,          # 每个角色发言轮数
+        )
+    )
+
+asyncio.run(main())
+```
+
+**回合模式**（`next_speaker` 动态决定发言顺序）：
+
+```python
+Dialogue(
+    roles=[...],
+    topic="...",
+    mode="round",              # 回合模式
+    max_turns=10,              # 最大发言次数
+)
+```
+
+## TaskConfig — 任务配置
+
+```python
+from harness import LLMTask, TaskConfig
+
+LLMTask(
+    prompt="分析代码质量",
+    config=TaskConfig(
+        max_retries=3,         # 最大重试次数（默认 3）
+        backoff_base=2.0,      # 指数退避基数（默认 2.0）
+        timeout=300,           # 超时秒数（默认 300）
+        env_overrides={"ANTHROPIC_MODEL": "claude-opus-4-5"},
+    ),
+)
+```
 
 ## 特性
 
