@@ -1,6 +1,6 @@
 # Harness
 
-> AI-native 通用自动化流水线框架，内置 Claude Code runner
+> AI-native 通用自动化流水线框架，支持 Claude Code CLI / OpenAI-compatible / Anthropic API
 
 [![PyPI](https://img.shields.io/pypi/v/harness-ai)](https://pypi.org/project/harness-ai/)
 [![Python](https://img.shields.io/badge/python-3.11+-blue)](https://python.org)
@@ -10,18 +10,20 @@
 
 声明你的流水线，框架负责可靠执行、记录、重试、调度、通知。
 
-- **Claude Code runner 优先**：调用 Claude Code CLI 子进程，完整工具链 + bypassPermissions + session 持久化
+- **多 runner 支持**：内置 ClaudeCliRunner（CLI 子进程）、OpenAIRunner（OpenAI-compatible）、AnthropicRunner（直接 API），也可自定义
 - **Task 类型多态**：LLMTask / FunctionTask / ShellTask / PollingTask / Parallel / Dialogue，混合编排
 - **开箱即用**：SQLite 存储、APScheduler v4 调度、Telegram 通知，均有抽象接口可替换
 
 ## 前置条件
 
-**必须先安装 [Claude Code CLI](https://docs.anthropic.com/en/claude-code)：**
+使用 **ClaudeCliRunner**（默认）时需要安装 [Claude Code CLI](https://docs.anthropic.com/en/claude-code)：
 
 ```bash
 npm install -g @anthropic-ai/claude-code
 claude --version   # 验证安装成功
 ```
+
+使用 `OpenAIRunner` 或 `AnthropicRunner` 时无需 Claude Code CLI，配置对应 API key 即可。
 
 ## 安装
 
@@ -66,7 +68,7 @@ asyncio.run(main())
 
 | 类型 | 用途 |
 |------|------|
-| `LLMTask` | 调用语言模型（默认 Claude Code CLI） |
+| `LLMTask` | 调用语言模型（默认 ClaudeCliRunner，可替换为 OpenAIRunner / AnthropicRunner） |
 | `FunctionTask` | 执行 Python 函数 |
 | `ShellTask` | 执行 Shell 命令 |
 | `PollingTask` | 提交异步任务后轮询（视频生成、TTS 等） |
@@ -123,6 +125,52 @@ LLMTask(
         env_overrides={"ANTHROPIC_MODEL": "claude-opus-4-5"},
     ),
 )
+```
+
+## Runner 配置
+
+`LLMTask` 默认使用 `ClaudeCliRunner`，通过 `Harness(runner=...)` 或 `LLMTask(runner=...)` 替换。
+
+### OpenAIRunner — 兼容 OpenAI 协议的 API
+
+```python
+from harness import Harness, OpenAIRunner
+
+# 读取系统环境变量 OPENAI_API_KEY / OPENAI_MODEL / OPENAI_BASE_URL
+h = Harness(project_path=".", runner=OpenAIRunner())
+
+# 对接 MiniMax、DeepSeek 等兼容服务（自定义变量名避免冲突）
+h = Harness(
+    project_path=".",
+    runner=OpenAIRunner(
+        api_key_env="MINIMAX_API_KEY",
+        base_url_env="MINIMAX_BASE_URL",
+        model_env="MINIMAX_MODEL",
+    ),
+)
+```
+
+### AnthropicRunner — Anthropic Messages API
+
+```python
+from harness import Harness, AnthropicRunner
+
+# 读取系统环境变量 ANTHROPIC_API_KEY / ANTHROPIC_MODEL
+h = Harness(project_path=".", runner=AnthropicRunner())
+```
+
+### 自定义 Runner
+
+```python
+from harness import AbstractRunner, RunnerResult
+
+class MyRunner(AbstractRunner):
+    async def execute(self, prompt, *, system_prompt, session_id, **kwargs) -> RunnerResult:
+        # 调用任意 LLM 服务
+        text = await my_llm_call(prompt, system_prompt)
+        return RunnerResult(text=text, tokens_used=0, session_id=None)
+
+h = Harness(project_path=".", runner=MyRunner())
 ```
 
 ## 特性

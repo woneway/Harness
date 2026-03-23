@@ -4,7 +4,7 @@
 
 ## 项目状态
 
-**阶段：v1 已实现**（122 tests pass，2026-03-21）
+**阶段：v1 已实现**（275 tests pass，2026-03-23）
 设计文档：`design/v1-design.md`
 
 ## 背景
@@ -28,6 +28,10 @@ from harness import (
     Task,                   # LLMTask 的已废弃别名（v2 移除）
     Result, PipelineResult,
     TaskConfig, Memory,
+    # Runner
+    AbstractRunner, RunnerResult,   # 自定义 runner 基类
+    OpenAIRunner,                   # OpenAI-compatible API（MiniMax、DeepSeek 等）
+    AnthropicRunner,                # Anthropic Messages API（非 CLI）
 )
 from harness.runners.claude_cli import PermissionMode  # 不在顶层导出
 
@@ -63,6 +67,8 @@ harness/
   runners/
     base.py            # AbstractRunner + RunnerResult
     claude_cli.py      # ClaudeCliRunner + PermissionMode
+    openai.py          # OpenAIRunner（OpenAI-compatible，含 MiniMax/DeepSeek 等）
+    anthropic.py       # AnthropicRunner（Anthropic Messages API）
     agent_leader.py    # AgentLeader（白名单约束 runner）
 
   storage/
