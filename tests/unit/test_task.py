@@ -6,6 +6,7 @@ import pytest
 from pydantic import BaseModel
 
 from harness.task import (
+    DialogueProgressEvent,
     FunctionTask,
     LLMTask,
     Parallel,
@@ -15,6 +16,7 @@ from harness.task import (
     ShellTask,
     Task,
     TaskConfig,
+    result_by_type,
 )
 from harness._internal.exceptions import InvalidPipelineError
 
@@ -368,3 +370,85 @@ class TestDialogue:
     def test_dialogue_max_turns_explicit(self) -> None:
         d = Dialogue(roles=[], max_turns=20)
         assert d.max_turns == 20
+
+    def test_dialogue_until_round_field(self) -> None:
+        d = Dialogue(roles=[], until_round=lambda ctx: ctx.round >= 3)
+        assert callable(d.until_round)
+        assert d.until is None
+
+    def test_dialogue_role_stream_callback(self) -> None:
+        cb = lambda role, chunk: None
+        d = Dialogue(roles=[], role_stream_callback=cb)
+        assert d.role_stream_callback is cb
+        # stream_callback 继承自 BaseTask，仍为 None（独立字段，无类型冲突）
+        assert d.stream_callback is None
+
+
+# ---------------------------------------------------------------------------
+# DialogueProgressEvent
+# ---------------------------------------------------------------------------
+
+
+class TestDialogueProgressEvent:
+    def test_start_event(self) -> None:
+        evt = DialogueProgressEvent(event="start", round_or_turn=0, role_name="MCP")
+        assert evt.event == "start"
+        assert evt.round_or_turn == 0
+        assert evt.role_name == "MCP"
+        assert evt.content is None
+
+    def test_complete_event_with_content(self) -> None:
+        evt = DialogueProgressEvent(
+            event="complete", round_or_turn=1, role_name="CLI", content="发言内容"
+        )
+        assert evt.content == "发言内容"
+
+    def test_error_event_with_content(self) -> None:
+        evt = DialogueProgressEvent(
+            event="error", round_or_turn=0, role_name="Skills", content="timeout"
+        )
+        assert evt.event == "error"
+        assert evt.content == "timeout"
+
+
+# ---------------------------------------------------------------------------
+# result_by_type
+# ---------------------------------------------------------------------------
+
+
+def _make_result(task_type: str, task_index: str = "0", output: str = "ok") -> Result:
+    return Result(
+        task_index=task_index,
+        task_type=task_type,  # type: ignore[arg-type]
+        output=output,
+        raw_text=output,
+        tokens_used=0,
+        duration_seconds=0.0,
+        success=True,
+        error=None,
+    )
+
+
+class TestResultByType:
+    def test_finds_first_match(self) -> None:
+        results = [_make_result("dialogue", "0"), _make_result("llm", "1")]
+        r = result_by_type(results, "dialogue")
+        assert r.task_type == "dialogue"
+
+    def test_finds_nth_match(self) -> None:
+        results = [
+            _make_result("llm", "0", "first"),
+            _make_result("llm", "1", "second"),
+        ]
+        assert result_by_type(results, "llm", 0).output == "first"
+        assert result_by_type(results, "llm", 1).output == "second"
+
+    def test_raises_on_missing_type(self) -> None:
+        results = [_make_result("llm", "0")]
+        with pytest.raises(ValueError, match="dialogue"):
+            result_by_type(results, "dialogue")
+
+    def test_raises_on_n_out_of_range(self) -> None:
+        results = [_make_result("llm", "0")]
+        with pytest.raises(ValueError, match="n=1"):
+            result_by_type(results, "llm", 1)

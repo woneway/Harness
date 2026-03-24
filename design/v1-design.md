@@ -279,10 +279,14 @@ class Dialogue(BaseTask):
     roles: list[Role]
     background: str = ""         # 注入所有角色 system_prompt 前的背景信息
     max_rounds: int = 3          # 轮次模式的最大轮数；回合模式下用于计算默认 max_turns
-    until: Callable[["DialogueContext"], bool] | None = None  # 提前终止条件
+    until: Callable[["DialogueContext"], bool] | None = None       # 每次发言后检查（内容条件）
+    until_round: Callable[["DialogueContext"], bool] | None = None # 每轮所有角色发完后检查（轮次条件）
     # 回合模式专用：
     next_speaker: Callable[[list["DialogueTurn"]], str] | None = None  # None = 轮次模式
     max_turns: int | None = None  # None 时默认 max_rounds × len(roles)
+    # 进度与流式回调：
+    progress_callback: Callable[["DialogueProgressEvent"], None] | None = None
+    role_stream_callback: Callable[[str, str], None] | None = None  # (role_name, chunk)
 ```
 
 **两种模式：**

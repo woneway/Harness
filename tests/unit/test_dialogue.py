@@ -638,6 +638,88 @@ class TestDialogueErrorHandling:
         assert result.output.final_content == "recovered"
 
 
+# ---- until_round ----
+
+
+class TestUntilRound:
+    @pytest.mark.asyncio
+    async def test_until_round_stops_after_complete_round(self) -> None:
+        """until_round 在第 1 轮（round=0）结束后触发，不应再进行第 2 轮。"""
+        runner = MockRunner(["a", "b", "c", "d", "e", "f"])
+        dialogue = Dialogue(
+            roles=[
+                Role(name="x", system_prompt="", prompt=lambda ctx: "p"),
+                Role(name="y", system_prompt="", prompt=lambda ctx: "p"),
+            ],
+            max_rounds=5,
+            until_round=lambda ctx: ctx.round >= 0,  # 第 1 轮结束后即停
+        )
+        result = await execute_dialogue(
+            dialogue=dialogue,
+            outer_index=0,
+            pipeline_results=[],
+            run_id="ur-1",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=None,
+        )
+        # 只跑了 1 轮，2 个角色各 1 次
+        assert runner._call_count == 2
+        assert result.output.rounds_completed == 1
+
+    @pytest.mark.asyncio
+    async def test_until_round_runs_all_roles_before_checking(self) -> None:
+        """until_round 必须等本轮所有角色发言完后才检查，不会中途截断。"""
+        runner = MockRunner(["a", "b", "c", "d", "e", "f"])
+        dialogue = Dialogue(
+            roles=[
+                Role(name="x", system_prompt="", prompt=lambda ctx: "p"),
+                Role(name="y", system_prompt="", prompt=lambda ctx: "p"),
+                Role(name="z", system_prompt="", prompt=lambda ctx: "p"),
+            ],
+            max_rounds=3,
+            until_round=lambda ctx: ctx.round >= 1,  # 第 2 轮结束后停
+        )
+        result = await execute_dialogue(
+            dialogue=dialogue,
+            outer_index=0,
+            pipeline_results=[],
+            run_id="ur-2",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=None,
+        )
+        # 2 轮 × 3 角色 = 6 次
+        assert runner._call_count == 6
+        assert result.output.rounds_completed == 2
+
+    @pytest.mark.asyncio
+    async def test_until_and_until_round_coexist(self) -> None:
+        """until 和 until_round 可以共存，until 先触发时 until_round 不再检查。"""
+        runner = MockRunner(["stop", "b", "c", "d"])
+        dialogue = Dialogue(
+            roles=[
+                Role(name="a", system_prompt="", prompt=lambda ctx: "p"),
+                Role(name="b", system_prompt="", prompt=lambda ctx: "p"),
+            ],
+            max_rounds=5,
+            until=lambda ctx: "stop" in (ctx.last_from("a") or ""),  # 第 1 个角色发言后触发
+            until_round=lambda ctx: ctx.round >= 3,
+        )
+        result = await execute_dialogue(
+            dialogue=dialogue,
+            outer_index=0,
+            pipeline_results=[],
+            run_id="ur-3",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=None,
+        )
+        # until 在角色 a 第 1 次发言后就触发，b 不应再发言
+        assert runner._call_count == 1
+        assert len(result.output.turns) == 1
+
+
 # ---- next_speaker 校验 ----
 
 

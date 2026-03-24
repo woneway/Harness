@@ -54,10 +54,11 @@ Harness 是一个 Python AI 工作流框架，通过组合 `LLMTask`（调用 Cl
 | LLM 推理 / 写作 / 总结 | `LLMTask` | 调用 Claude Code CLI |
 | 确定性逻辑、文件 I/O、数据处理 | `FunctionTask` | 纯 Python，不过 LLM |
 | Shell 命令 | `ShellTask` | asyncio 子进程 |
+| 多角色对话 / 辩论 / 讨论 | `Dialogue` + `Role` | 多角色轮流发言，含历史上下文 |
 | 可同时运行的独立步骤 | `Parallel([...])` | 等待所有子任务完成 |
-| 提交异步 job → 轮询结果 | `PollingTask` | 用于异步外部 API |
+| 提交异步 job → 轮询结果 | `PollingTask` | 用于异步外部 AI API |
 
-**原则：** 确定性操作用 `FunctionTask`，只有需要推理或语言能力时才用 `LLMTask`。
+**原则：** 确定性操作用 `FunctionTask`，只有需要推理或语言能力时才用 `LLMTask`，多角色交互用 `Dialogue`。
 
 ### 步骤 2：规划数据流
 
@@ -67,6 +68,19 @@ Task 1 输出 → results[1].output  （Task 2+ 可访问）
 ```
 
 **Parallel 块内：** 每个子任务收到的 `results` 来自 Parallel 块**之前**的任务，不包含兄弟任务的输出。
+
+**访问 results 的推荐方式：** 用 `result_by_type` 替代脆弱的整数下标，pipeline 重排时报错明确：
+
+```python
+from harness import result_by_type
+
+def save(results: list) -> Path:
+    dialogue_out = result_by_type(results, "dialogue").output   # DialogueOutput
+    summary = result_by_type(results, "llm").output             # str
+    # 如果有多个同类型 task：result_by_type(results, "llm", n=1)
+```
+
+task_type 枚举：`"llm"` | `"function"` | `"shell"` | `"polling"` | `"dialogue"`
 
 **何时用 `output_schema`：** 后续任务需要访问 LLMTask 输出的特定字段时。使用时，prompt 必须明确要求 LLM 输出符合 schema 字段的 JSON——Harness 负责校验结构，但不会自动注入格式指令。
 
@@ -97,6 +111,97 @@ FunctionTask [保存]    — results[1].output.signal → {symbol}_report.md
 ```
 
 只有当存在会改变整体结构的真实歧义时，才等待用户确认。
+
+---
+
+## Dialogue 多角色对话
+
+### 基础用法
+
+```python
+from harness import Dialogue, Role, DialogueProgressEvent
+import sys
+
+def make_role_a_prompt(ctx) -> str:
+    if not ctx.all_from("角色A"):          # 判断是否首轮：用 all_from，不用 ctx.history
+        return "你是角色A。开场陈述..."
+    last_b = ctx.last_from("角色B") or ""
+    return f"角色B 说：{last_b[-300:]}\n\n请反驳..."
+
+def make_role_b_prompt(ctx) -> str:
+    if not ctx.all_from("角色B"):
+        return "你是角色B。开场陈述..."
+    last_a = ctx.last_from("角色A") or ""
+    return f"角色A 说：{last_a[-300:]}\n\n请反驳..."
+
+# progress_callback 接收结构化事件对象（不是位置参数）
+def on_progress(evt: DialogueProgressEvent) -> None:
+    if evt.event == "start":
+        sys.stderr.write(f"[{evt.role_name}] 第 {evt.round_or_turn + 1} 轮...\n")
+    elif evt.event == "complete":
+        sys.stderr.write("✓ 完成\n")
+    elif evt.event == "error":
+        sys.stderr.write(f"❌ 出错: {evt.content}\n")
+    sys.stderr.flush()
+
+# role_stream_callback 携带角色名（注意：不是 stream_callback）
+def on_stream(role_name: str, chunk: str) -> None:
+    sys.stderr.write(chunk)
+    sys.stderr.flush()
+
+dialogue = Dialogue(
+    roles=[
+        Role(name="角色A", system_prompt="你是专业辩手。", prompt=make_role_a_prompt),
+        Role(name="角色B", system_prompt="你是专业辩手。", prompt=make_role_b_prompt),
+    ],
+    background="你是辩论主持人。辩题：...",
+    max_rounds=5,
+    # until_round：每轮所有角色发完后检查（推荐用于轮次终止）
+    until_round=lambda ctx: ctx.round >= 4,
+    # until：每次发言后检查（用于内容条件终止，如"达成共识"）
+    # until=lambda ctx: "同意" in (ctx.last_from("角色B") or ""),
+    progress_callback=on_progress,
+    role_stream_callback=on_stream,    # ← 注意字段名是 role_stream_callback，不是 stream_callback
+)
+```
+
+### `until` vs `until_round` 选择
+
+| 场景 | 使用 |
+|------|------|
+| 固定轮数终止 | `until_round=lambda ctx: ctx.round >= N-1` |
+| 内容条件终止（如达成共识） | `until=lambda ctx: ...` |
+| 两者都需要 | 均可设置，`until` 先触发时 `until_round` 不再检查 |
+
+**陷阱：** 用 `until` 模拟轮次终止时需要检查最后一个角色名，容易写错：
+
+```python
+# ❌ 错误：只检查轮次，会在第一个角色发完后就停止
+until=lambda ctx: ctx.round >= 4
+
+# ✓ 正确：用 until_round（每轮结束后检查）
+until_round=lambda ctx: ctx.round >= 4
+```
+
+### Dialogue 的输出
+
+```python
+from harness import result_by_type
+from harness.task import DialogueOutput
+
+def summarize(results: list) -> str:
+    out: DialogueOutput = result_by_type(results, "dialogue").output
+    # out.turns: list[DialogueTurn] — 所有发言，按时间顺序
+    # out.rounds_completed: int
+    # out.total_turns: int
+    # out.final_speaker: str
+    # out.final_content: str
+    turns_text = "\n\n".join(
+        f"【{t.role_name} · 第 {t.round + 1} 轮】\n{t.content}"
+        for t in out.turns
+    )
+    return f"辩论记录：\n{turns_text}"
+```
 
 ---
 
@@ -321,13 +426,17 @@ Task 2 [保存]    ✅  0.1s
 |------|---------|
 | `from harness.task import Parallel, PollingTask` | 应为 `from harness import Parallel, PollingTask`（已在顶层导出） |
 | `Parallel([task_a, task_b])` 子任务没有执行 | v1.0 的 bug（位置参数落到 `config`），已修复；两种写法均可，推荐 `Parallel(tasks=[...])` |
-| Task 1 里写 `lambda results: results[1].output` | Task 1 只有 `results[0]`，检查索引 |
+| Task 1 里写 `lambda results: results[1].output` | Task 1 只有 `results[0]`；改用 `result_by_type(results, "llm")` 更健壮 |
 | 循环里用 `lambda results: f"...{x}"` | 用闭包捕获 `x`：`def make_prompt(x): ...` |
 | 设置了 `output_schema` 但 prompt 没要求 JSON | 在 prompt 里明确说明 JSON 格式要求 |
 | Parallel 子任务访问兄弟任务的结果 | 子任务只能看到 Parallel 块**之前**的 results |
 | 在本 skill 里实现复杂子系统 | 用 `NotImplementedError` 占位符 + 接口说明 |
 | 有占位符时跑端到端 | 有占位符就跳过 e2e，只交付骨架 |
 | 使用 `Task(...)` | 改用 `LLMTask(...)`，`Task` 已废弃 |
+| `Dialogue` 中判断首轮用 `if not ctx.history` | 所有角色共用 `history`；改用 `if not ctx.all_from("角色名")` 判断该角色是否发过言 |
+| `Dialogue(stream_callback=...)` 多角色流式 | `Dialogue` 的多角色流式用 `role_stream_callback=lambda role, chunk: ...`，`stream_callback` 是单角色签名 |
+| `progress_callback(event, round, role, content?)` 位置参数 | `progress_callback` 接收 `DialogueProgressEvent` 对象：`def on_progress(evt: DialogueProgressEvent): ...` |
+| `until=lambda ctx: ctx.round >= N-1` 轮次终止 | 用 `until_round`：每轮所有角色发完后检查；`until` 是每次发言后检查，会在第一个角色发言后就触发 |
 
 ---
 

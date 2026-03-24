@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 from harness._internal.exceptions import TaskFailedError
 from harness._internal.task_index import TaskIndex
-from harness.task import Dialogue, DialogueOutput, DialogueTurn, TaskConfig
+from harness.task import Dialogue, DialogueOutput, DialogueProgressEvent, DialogueTurn, TaskConfig
 
 logger = logging.getLogger(__name__)
 
@@ -93,14 +93,28 @@ async def _execute_turn(
     runner = role.runner or harness_runner
     last_error = ""
     attempt = 0
+    turn_start = time.monotonic()
+
+    # 封装 role_stream_callback，携带角色名，供调用方区分多角色输出
+    role_stream_cb = None
+    if dialogue.role_stream_callback is not None:
+        _cb = dialogue.role_stream_callback
+        role_stream_cb = lambda chunk: _cb(role_name, chunk)  # noqa: E731
 
     while attempt <= config.max_retries:
+        # 进度回调：每次（含重试）发言开始
+        if dialogue.progress_callback:
+            dialogue.progress_callback(
+                DialogueProgressEvent(event="start", round_or_turn=round_or_turn, role_name=role_name)
+            )
+
         try:
             runner_result = await asyncio.wait_for(
                 runner.execute(
                     prompt_text,
                     system_prompt=merged_system,
                     session_id=role_sessions[role_name],
+                    stream_callback=role_stream_cb,
                 ),
                 timeout=config.timeout,
             )
@@ -123,9 +137,19 @@ async def _execute_turn(
                     output_schema_class=None,
                     raw_text=runner_result.text,
                     tokens_used=runner_result.tokens_used,
-                    duration_seconds=0.0,
+                    duration_seconds=time.monotonic() - turn_start,
                     success=True,
                     error=None,
+                )
+            # 进度回调：发言完成
+            if dialogue.progress_callback:
+                dialogue.progress_callback(
+                    DialogueProgressEvent(
+                        event="complete",
+                        round_or_turn=round_or_turn,
+                        role_name=role_name,
+                        content=runner_result.text,
+                    )
                 )
             return turn, runner_result.tokens_used
 
@@ -133,6 +157,17 @@ async def _execute_turn(
         if attempt <= config.max_retries:
             wait = config.backoff_base ** (attempt - 1)
             await asyncio.sleep(wait)
+
+    # 进度回调：发言出错
+    if dialogue.progress_callback:
+        dialogue.progress_callback(
+            DialogueProgressEvent(
+                event="error",
+                round_or_turn=round_or_turn,
+                role_name=role_name,
+                content=last_error,
+            )
+        )
 
     raise TaskFailedError(run_id, task_index, "dialogue", last_error)
 
@@ -196,6 +231,18 @@ async def execute_dialogue(
             rounds_completed = round_num + 1
             if done:
                 break
+
+            # until_round：每轮所有角色发言完后检查（比 until 更直观的轮次终止）
+            if dialogue.until_round is not None and history:
+                round_ctx = DialogueContext(
+                    round=round_num,
+                    role_name=dialogue.roles[-1].name,
+                    background=dialogue.background,
+                    history=list(history),
+                    pipeline_results=list(pipeline_results),
+                )
+                if dialogue.until_round(round_ctx):
+                    break
     else:
         # ── 回合模式 ──
         valid_role_names = {r.name for r in dialogue.roles}

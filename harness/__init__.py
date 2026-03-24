@@ -27,6 +27,7 @@ from harness.runners.base import AbstractRunner, RunnerResult
 from harness.runners.openai import OpenAIRunner
 from harness.task import (
     Dialogue,
+    DialogueProgressEvent,
     FunctionTask,
     LLMTask,
     Parallel,
@@ -37,6 +38,7 @@ from harness.task import (
     ShellTask,
     Task,
     TaskConfig,
+    result_by_type,
 )
 
 __all__ = [
@@ -47,6 +49,7 @@ __all__ = [
     "PollingTask",
     "Parallel",
     "Dialogue",
+    "DialogueProgressEvent",
     "Role",
     "Task",
     "Result",
@@ -58,4 +61,6 @@ __all__ = [
     "RunnerResult",
     "OpenAIRunner",
     "AnthropicRunner",
+    # 辅助函数
+    "result_by_type",
 ]

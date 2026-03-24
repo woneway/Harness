@@ -159,15 +159,29 @@ class Harness:
 
     async def run(
         self,
-        prompt: str | Callable,
+        step: str | Callable | PipelineStep,
         *,
         output_schema: type | None = None,
         config: TaskConfig | None = None,
     ) -> Result:
-        """单次 LLMTask 调用（pipeline 的语法糖）。"""
-        pipeline_result = await self.pipeline(
-            [LLMTask(prompt=prompt, output_schema=output_schema, config=config)]
-        )
+        """单次任务调用（pipeline 的语法糖）。
+
+        Args:
+            step: LLMTask 的 prompt（str 或 Callable），或直接传入 PipelineStep（如 Dialogue）。
+        """
+        if isinstance(step, (LLMTask, Dialogue, FunctionTask, ShellTask, PollingTask, Parallel)):
+            if output_schema is not None or config is not None:
+                import warnings
+                warnings.warn(
+                    "output_schema and config are ignored when step is a PipelineStep. "
+                    "Set them directly on the task object.",
+                    stacklevel=2,
+                )
+            pipeline_result = await self.pipeline([step])
+        else:
+            pipeline_result = await self.pipeline(
+                [LLMTask(prompt=step, output_schema=output_schema, config=config)]
+            )
         return pipeline_result.results[0]
 
     async def pipeline(

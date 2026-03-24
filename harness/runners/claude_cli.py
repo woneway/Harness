@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import signal
 from enum import StrEnum
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 from harness._internal.exceptions import ClaudeNotFoundError
 from harness._internal.stream_parser import StreamParser
@@ -148,17 +151,33 @@ class ClaudeCliRunner(AbstractRunner):
             raw_stream_callback=raw_stream_callback,
         )
 
-        # 逐行读取 stdout
+        # 同时读取 stdout（解析）和 stderr（drain），防止管道缓冲区满死锁。
+        # stderr 内容在子进程异常退出时记录到日志供调试。
         assert proc.stdout is not None
-        try:
-            async for line in proc.stdout:
+        assert proc.stderr is not None
+        stderr_chunks: list[str] = []
+
+        async def _read_stdout() -> None:
+            async for line in proc.stdout:  # type: ignore[union-attr]
                 parser.feed(line.decode(errors="replace").rstrip("\n"))
+
+        async def _collect_stderr() -> None:
+            data = await proc.stderr.read()  # type: ignore[union-attr]
+            if data:
+                stderr_chunks.append(data.decode(errors="replace"))
+
+        try:
+            await asyncio.gather(_read_stdout(), _collect_stderr())
         except asyncio.CancelledError:
             # 取消时发送 SIGTERM → 等 5s → SIGKILL
             await self._terminate(proc)
             raise
 
         await proc.wait()
+
+        if proc.returncode != 0 and stderr_chunks:
+            stderr_text = "".join(stderr_chunks)
+            logger.warning("claude exited %d, stderr: %s", proc.returncode, stderr_text[:1000])
 
         return RunnerResult(
             text=parser.final_text or "",

@@ -62,6 +62,24 @@ class PipelineResult:
 
 
 @dataclass
+class DialogueProgressEvent:
+    """progress_callback 接收的结构化事件。
+
+    Attributes:
+        event:         "start" | "complete" | "error"
+        round_or_turn: 当前轮次（从 0 开始）
+        role_name:     当前发言角色名
+        content:       发言内容（event="complete"）或错误信息（event="error"），
+                       event="start" 时为 None
+    """
+
+    event: Literal["start", "complete", "error"]
+    round_or_turn: int
+    role_name: str
+    content: str | None = None
+
+
+@dataclass
 class BaseTask:
     """所有 Task 类型的公共基类，用户不直接实例化。
 
@@ -233,11 +251,49 @@ class Dialogue(BaseTask):
     background: str = ""
     max_rounds: int = 3
     until: Callable[["DialogueContext"], bool] | None = None
+    # 轮次模式专用：每轮所有角色发言完毕后检查，比 until 更直观。
+    # until_round(ctx) 返回 True 时结束，此时 ctx.role_name 为最后一个角色名。
+    until_round: Callable[["DialogueContext"], bool] | None = None
 
     # 回合模式专用：设置后启用动态发言顺序
     next_speaker: Callable[[list["DialogueTurn"]], str] | None = None
     # 回合模式最大发言次数；None 时默认 max_rounds × len(roles)
     max_turns: int | None = None
+
+    # 进度回调：每次发言开始/结束时调用，用于进度显示。
+    # 签名：(event: DialogueProgressEvent) → None
+    progress_callback: Callable[["DialogueProgressEvent"], None] | None = None
+    # 多角色 streaming 回调：实时接收 runner 输出的文本片段，携带角色名。
+    # 签名：(role_name: str, chunk: str)
+    # 注：不覆盖 BaseTask.stream_callback（Callable[[str], None]），两者语义不同。
+    role_stream_callback: Callable[[str, str], None] | None = None
+
+
+def result_by_type(results: "list[Result]", task_type: str, n: int = 0) -> "Result":
+    """从 pipeline results 按 task_type 取第 n 个结果（默认第 0 个）。
+
+    在 FunctionTask.fn 中替代脆弱的整数下标访问，当 pipeline 顺序变化时报错更明确。
+
+    Args:
+        results:   FunctionTask.fn 接收的 list[Result]。
+        task_type: "llm" | "function" | "shell" | "polling" | "dialogue"
+        n:         第 n 个匹配（从 0 开始），默认 0。
+
+    Raises:
+        ValueError: 没有找到匹配的 task_type 或 n 超出范围。
+    """
+    matches = [r for r in results if r.task_type == task_type]
+    if not matches:
+        raise ValueError(
+            f"No result with task_type={task_type!r}. "
+            f"Available types: {[r.task_type for r in results]}"
+        )
+    if n >= len(matches):
+        raise ValueError(
+            f"result_by_type: n={n} out of range for task_type={task_type!r} "
+            f"(found {len(matches)} match(es))"
+        )
+    return matches[n]
 
 
 # Forward reference placeholder for type checking only

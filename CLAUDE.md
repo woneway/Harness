@@ -25,9 +25,11 @@ from harness import (
     Harness,
     LLMTask, FunctionTask, ShellTask, PollingTask, Parallel,
     Dialogue, Role,         # 多角色辩论循环
+    DialogueProgressEvent,  # Dialogue.progress_callback 接收的结构化事件
     Task,                   # LLMTask 的已废弃别名（v2 移除）
     Result, PipelineResult,
     TaskConfig, Memory,
+    result_by_type,         # 按 task_type 从 results 取结果，替代 results[N]
     # Runner
     AbstractRunner, RunnerResult,   # 自定义 runner 基类
     OpenAIRunner,                   # OpenAI-compatible API（MiniMax、DeepSeek 等）
