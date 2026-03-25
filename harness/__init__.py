@@ -25,7 +25,7 @@ from harness.memory import Memory
 from harness.runners.anthropic import AnthropicRunner
 from harness.runners.base import AbstractRunner, RunnerResult
 from harness.runners.openai import OpenAIRunner
-from harness.task import (
+from harness.tasks import (
     Dialogue,
     DialogueProgressEvent,
     FunctionTask,

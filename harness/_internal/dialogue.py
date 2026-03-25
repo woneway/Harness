@@ -11,11 +11,11 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from harness.runners.base import AbstractRunner
     from harness.storage.base import StorageProtocol
-    from harness.task import Result
+    from harness.tasks import Result
 
 from harness._internal.exceptions import TaskFailedError
 from harness._internal.task_index import TaskIndex
-from harness.task import Dialogue, DialogueOutput, DialogueProgressEvent, DialogueTurn, TaskConfig
+from harness.tasks import Dialogue, DialogueOutput, DialogueProgressEvent, DialogueTurn, TaskConfig
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +191,7 @@ async def execute_dialogue(
     回合模式（next_speaker 已设置）：
         next_speaker(history) 决定每次谁发言，until 在每次发言后检查。
     """
-    from harness.task import Result
+    from harness.tasks import Result
 
     config = dialogue.config or harness_config or TaskConfig()
     start_time = time.monotonic()

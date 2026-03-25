@@ -27,7 +27,7 @@ from harness.notifier.base import AbstractNotifier
 from harness.runners.base import AbstractRunner
 from harness.runners.claude_cli import ClaudeCliRunner
 from harness.storage.sql import SQLStorage
-from harness.task import (
+from harness.tasks import (
     Dialogue,
     FunctionTask,
     LLMTask,

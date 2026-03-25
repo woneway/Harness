@@ -20,7 +20,7 @@ from harness._internal.exceptions import (
 )
 from harness._internal.session import SessionManager
 from harness.runners.base import AbstractRunner
-from harness.task import (
+from harness.tasks import (
     FunctionTask,
     LLMTask,
     Parallel,

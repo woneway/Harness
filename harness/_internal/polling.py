@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from harness._internal.exceptions import TaskFailedError
-from harness.task import PollingTask, Result, TaskConfig
+from harness.tasks import PollingTask, Result, TaskConfig
 
 
 async def execute_polling(

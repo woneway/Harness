@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from harness._internal.exceptions import InvalidPipelineError, TaskFailedError
 from harness._internal.task_index import TaskIndex
-from harness.task import (
+from harness.tasks import (
     FunctionTask,
     LLMTask,
     Parallel,
