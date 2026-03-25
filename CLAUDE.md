@@ -4,8 +4,15 @@
 
 ## 项目状态
 
-**阶段：v1 已实现**（275 tests pass，2026-03-23）
-设计文档：`design/v1-design.md`
+**阶段：v2.0 已实现**（370 tests pass，2026-03-25）
+设计文档：`design/v1-design.md`（v1）、`design/v2-architecture.md`（v2 完整蓝图）
+
+v2.0 新增：
+- `State` 共享状态（替代 `results[N]`）
+- `output_key` 自动写入 state
+- `Condition` 条件分支 / `Loop` 循环
+- `tasks/` 目录拆分（v1 import 路径仍可用）
+- v1 callable 签名 `fn(results)` 自动兼容
 
 ## 背景
 
@@ -23,6 +30,8 @@ IterationForge 将成为 Harness 的第一个使用方。
 ```python
 from harness import (
     Harness,
+    State,                  # v2: 共享状态基类
+    Condition, Loop,        # v2: 流程控制
     LLMTask, FunctionTask, ShellTask, PollingTask, Parallel,
     Dialogue, Role,         # 多角色辩论循环
     DialogueProgressEvent,  # Dialogue.progress_callback 接收的结构化事件
@@ -42,7 +51,27 @@ h = Harness(project_path="/path/to/project")
 # 单次 LLM 调用
 result = await h.run("分析并修复代码质量问题")
 
-# 多步混合流水线
+# v2: State 模式 pipeline（推荐）
+class MyState(State):
+    analysis: str = ""
+    report: str = ""
+
+pr = await h.pipeline([
+    FunctionTask(fn=lambda state: state._set_output("data", fetch()), output_key="data"),
+    LLMTask("分析数据", output_key="analysis"),
+    Condition(
+        check=lambda state: len(state.analysis) > 100,
+        if_true=[LLMTask("生成详细报告", output_key="report")],
+        if_false=[FunctionTask(fn=lambda state: "简短报告", output_key="report")],
+    ),
+    Loop(
+        body=[LLMTask("优化报告", output_key="report")],
+        until=lambda state: quality_ok(state.report),
+        max_iterations=3,
+    ),
+], state=MyState())
+
+# v1: results 模式 pipeline（向后兼容）
 results = await h.pipeline([
     FunctionTask(fn=collect_data),
     LLMTask("分析数据，给出优化建议"),
@@ -63,8 +92,24 @@ await h.start()
 harness/
   __init__.py          # 公开 API 导出
   harness.py           # Harness 主类（用户入口）
-  task.py              # 所有 Task 类型 + TaskConfig + Result + PipelineResult
+  state.py             # State 共享状态基类（v2 新增）
+  task.py              # re-export shim → harness.tasks（v1 兼容）
   memory.py            # Memory（历史运行注入 + memory.md）
+
+  tasks/               # v2 新增：拆分的任务模块
+    __init__.py        # 统一导出
+    config.py          # TaskConfig
+    result.py          # Result, PipelineResult, result_by_type
+    base.py            # BaseTask, DialogueProgressEvent
+    llm.py             # LLMTask（含 output_key）
+    function.py        # FunctionTask（含 output_key）
+    shell.py           # ShellTask（含 output_key）
+    polling.py         # PollingTask（含 output_key）
+    parallel.py        # Parallel
+    dialogue.py        # Dialogue, Role, DialogueTurn, DialogueOutput
+    condition.py       # Condition（v2 新增）
+    loop.py            # Loop（v2 新增）
+    types.py           # PipelineStep union 类型别名
 
   runners/
     base.py            # AbstractRunner + RunnerResult
@@ -88,6 +133,10 @@ harness/
 
   _internal/
     executor.py        # Task 派发 + 重试 + session 管理 + prompt 注入
+    compat.py          # v1/v2 callable 双模式检测（v2 新增）
+    condition.py       # Condition 执行逻辑（v2 新增）
+    loop.py            # Loop 执行逻辑（v2 新增）
+    task_index.py      # TaskIndex 结构化索引（含 cond/loop 格式）
     parallel.py        # Parallel 并发执行（asyncio.gather + error_policy）
     polling.py         # PollingTask 轮询循环
     dialogue.py        # Dialogue 多角色执行 + DialogueContext
@@ -106,7 +155,10 @@ harness/
 | 默认存储 | SQLite + WAL，路径 `{project_path}/.harness/harness.db` |
 | 默认权限 | `PermissionMode.BYPASS`（无人值守） |
 | `run()` | `pipeline([single_LLMTask])` 语法糖 |
-| task_index | 字符串，顺序：`"0"/"1"`，Parallel 内：`"2.0"/"2.1"` |
+| task_index | 字符串，顺序：`"0"/"1"`，Parallel：`"2.0"/"2.1"`，Condition：`"3.c0"/"3.f0"`，Loop：`"4.i2.1"` |
+| State 模式 | `pipeline(state=State())` 启用共享状态；v1 callable `fn(results)` 自动兼容 |
+| output_key | 所有 Task 类型支持 `output_key="field"`，执行后自动 `state._set_output(key, output)` |
+| Condition/Loop | 不能嵌入 Parallel 内部（`InvalidPipelineError`），可包含任意其他 PipelineStep |
 | Session 策略 | pipeline 内 LLMTask 共享 session；重试/续跑时生成新 session，注入前序输出兜底 |
 | output_schema | `type[BaseModel]`（LLMTask/PollingTask）或 `type`（FunctionTask isinstance 校验） |
 | TaskConfig 优先级 | `task.config > harness.default_config > TaskConfig()` |
@@ -135,8 +187,8 @@ pytest tests/ --cov=harness --cov-report=term-missing
 ```
 
 测试分布：
-- `tests/unit/`：exceptions, executor, harness, memory, parallel, polling, stream_parser, task
-- `tests/integration/`：pipeline（端到端，不需要 Claude CLI）、storage（SQLite 读写）
+- `tests/unit/`：exceptions, executor, harness, memory, parallel, polling, stream_parser, task, state, compat, state_executor, task_index, condition, loop, tasks_split
+- `tests/integration/`：pipeline（端到端，不需要 Claude CLI）、storage（SQLite 读写）、state_pipeline
 
 ## 示例
 
