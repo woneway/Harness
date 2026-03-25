@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
+from harness._internal.condition import execute_condition
 from harness._internal.deserialize import deserialize_output
 from harness._internal.exceptions import InvalidPipelineError, ResumeSchemaError, TaskFailedError
 from harness._internal.task_index import TaskIndex
@@ -19,6 +20,7 @@ from harness._internal.executor import (
     execute_shell_task,
 )
 from harness._internal.dialogue import execute_dialogue
+from harness._internal.loop import execute_loop
 from harness._internal.parallel import execute_parallel
 from harness._internal.polling import execute_polling
 from harness._internal.session import SessionManager
@@ -29,9 +31,11 @@ from harness.runners.claude_cli import ClaudeCliRunner
 from harness.state import State
 from harness.storage.sql import SQLStorage
 from harness.tasks import (
+    Condition,
     Dialogue,
     FunctionTask,
     LLMTask,
+    Loop,
     Parallel,
     PipelineResult,
     PipelineStep,
@@ -210,13 +214,18 @@ class Harness:
         """
         await self._ensure_initialized()
 
-        # 入口校验：嵌套 Parallel
+        # 入口校验
         for i, task in enumerate(tasks):
             if isinstance(task, Parallel):
                 for subtask in task.tasks:
                     if isinstance(subtask, Parallel):
                         raise InvalidPipelineError(
                             f"Nested Parallel is not supported. "
+                            f"Found at index {i}."
+                        )
+                    if isinstance(subtask, (Condition, Loop)):
+                        raise InvalidPipelineError(
+                            f"Condition/Loop inside Parallel is not supported in v2.0. "
                             f"Found at index {i}."
                         )
 
@@ -467,6 +476,62 @@ class Harness:
                         storage=self._storage,
                         state=state,
                     )
+                elif isinstance(task, Condition):
+                    # Condition 递归执行子步骤
+                    async def _exec_step_for_cond(step: PipelineStep, ti: str, st: State) -> Result:
+                        return await self._execute_single_step(
+                            step, ti, results, run_id, session_manager,
+                            memory_injection, state=st, last_llm_index=None,
+                            outer_index=None,
+                        )
+
+                    sub_results = await execute_condition(
+                        task, outer_index, state, execute_step=_exec_step_for_cond,
+                    )
+                    for r in sub_results:
+                        await self._storage.save_task_log(
+                            run_id, r.task_index, r.task_type,
+                            output=r.output,
+                            output_schema_class=None,
+                            raw_text=r.raw_text,
+                            tokens_used=r.tokens_used,
+                            duration_seconds=r.duration_seconds,
+                            success=r.success,
+                            error=r.error,
+                        )
+                        total_tokens += r.tokens_used
+                        results.append(r)
+                        state._append_result(r)
+                    continue
+
+                elif isinstance(task, Loop):
+                    # Loop 递归执行子步骤
+                    async def _exec_step_for_loop(step: PipelineStep, ti: str, st: State) -> Result:
+                        return await self._execute_single_step(
+                            step, ti, results, run_id, session_manager,
+                            memory_injection, state=st, last_llm_index=None,
+                            outer_index=None,
+                        )
+
+                    sub_results = await execute_loop(
+                        task, outer_index, state, execute_step=_exec_step_for_loop,
+                    )
+                    for r in sub_results:
+                        await self._storage.save_task_log(
+                            run_id, r.task_index, r.task_type,
+                            output=r.output,
+                            output_schema_class=None,
+                            raw_text=r.raw_text,
+                            tokens_used=r.tokens_used,
+                            duration_seconds=r.duration_seconds,
+                            success=r.success,
+                            error=r.error,
+                        )
+                        total_tokens += r.tokens_used
+                        results.append(r)
+                        state._append_result(r)
+                    continue
+
                 else:
                     raise TypeError(f"Unknown task type: {type(task)}")
 
@@ -543,6 +608,97 @@ class Harness:
             total_tokens=total_tokens,
             total_duration_seconds=total_duration,
         )
+
+    async def _execute_single_step(
+        self,
+        task: PipelineStep,
+        task_index: str,
+        results: list[Result],
+        run_id: str,
+        session_manager: SessionManager,
+        memory_injection: str,
+        *,
+        state: State,
+        last_llm_index: int | None,
+        outer_index: int | None,
+    ) -> Result:
+        """执行单个 PipelineStep（供 Condition/Loop 递归调用）。
+
+        不处理 Parallel/Condition/Loop（子步骤只支持原子任务类型和 Dialogue）。
+        不负责 save_task_log 和 results 追加（调用方负责）。
+        """
+        effective_cb = task.stream_callback or self._stream_callback
+        effective_raw_cb = task.raw_stream_callback or self._raw_stream_callback
+
+        if isinstance(task, LLMTask):
+            task_with_cb = LLMTask(
+                prompt=task.prompt,
+                system_prompt=task.system_prompt,
+                output_schema=task.output_schema,
+                runner=task.runner,
+                config=task.config,
+                stream_callback=effective_cb,
+                raw_stream_callback=effective_raw_cb,
+                output_key=task.output_key,
+            )
+            r = await execute_llm_task(
+                task_with_cb,
+                task_index,
+                results,
+                run_id,
+                harness_system_prompt=self._system_prompt,
+                harness_runner=self._runner,
+                harness_config=self._default_config,
+                session_manager=session_manager,
+                memory_injection=memory_injection,
+                storage=self._storage,
+                is_new_session=session_manager.is_broken,
+                state=state,
+            )
+        elif isinstance(task, FunctionTask):
+            r = await execute_function_task(
+                task, task_index, results, run_id,
+                harness_config=self._default_config,
+                env_overrides=self._env_overrides,
+                state=state,
+            )
+        elif isinstance(task, ShellTask):
+            r = await execute_shell_task(
+                task, task_index, results, run_id,
+                harness_config=self._default_config,
+                env_overrides=self._env_overrides,
+                state=state,
+            )
+        elif isinstance(task, PollingTask):
+            r = await execute_polling(
+                task, task_index, results, run_id,
+                harness_config=self._default_config,
+                state=state,
+            )
+        elif isinstance(task, Dialogue):
+            # Dialogue 内部使用 outer_index 解析 task_index
+            # 从传入的 task_index 解析出 outer
+            parsed = TaskIndex.parse(task_index)
+            r = await execute_dialogue(
+                dialogue=task,
+                outer_index=parsed.outer,
+                pipeline_results=results,
+                run_id=run_id,
+                harness_system_prompt=self._system_prompt,
+                harness_runner=self._runner,
+                harness_config=self._default_config,
+                storage=self._storage,
+                state=state,
+            )
+        else:
+            raise TypeError(f"Unsupported task type in Condition/Loop: {type(task)}")
+
+        # output_key 写入 state
+        output_key = getattr(task, "output_key", None)
+        if output_key and r.success:
+            state._set_output(output_key, r.output)
+
+        return r
 
     def schedule(
         self,

@@ -27,10 +27,12 @@ from harness.state import State
 from harness.runners.base import AbstractRunner, RunnerResult
 from harness.runners.openai import OpenAIRunner
 from harness.tasks import (
+    Condition,
     Dialogue,
     DialogueProgressEvent,
     FunctionTask,
     LLMTask,
+    Loop,
     Parallel,
     PipelineResult,
     PollingTask,
@@ -45,6 +47,8 @@ from harness.tasks import (
 __all__ = [
     "Harness",
     "State",
+    "Condition",
+    "Loop",
     "LLMTask",
     "FunctionTask",
     "ShellTask",

@@ -4,10 +4,12 @@
 """
 
 from harness.tasks.base import BaseTask, DialogueProgressEvent
+from harness.tasks.condition import Condition
 from harness.tasks.config import TaskConfig
 from harness.tasks.dialogue import Dialogue, DialogueOutput, DialogueTurn, Role
 from harness.tasks.function import FunctionTask
 from harness.tasks.llm import LLMTask
+from harness.tasks.loop import Loop
 from harness.tasks.parallel import Parallel
 from harness.tasks.polling import PollingTask
 from harness.tasks.result import PipelineResult, Result, result_by_type
@@ -30,6 +32,9 @@ __all__ = [
     "ShellTask",
     "PollingTask",
     "Parallel",
+    # flow control
+    "Condition",
+    "Loop",
     # dialogue
     "Dialogue",
     "DialogueOutput",

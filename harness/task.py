@@ -2,12 +2,14 @@
 
 from harness.tasks import (  # noqa: F401
     BaseTask,
+    Condition,
     Dialogue,
     DialogueOutput,
     DialogueProgressEvent,
     DialogueTurn,
     FunctionTask,
     LLMTask,
+    Loop,
     Parallel,
     PipelineResult,
     PipelineStep,
@@ -22,12 +24,14 @@ from harness.tasks import (  # noqa: F401
 
 __all__ = [
     "BaseTask",
+    "Condition",
     "Dialogue",
     "DialogueOutput",
     "DialogueProgressEvent",
     "DialogueTurn",
     "FunctionTask",
     "LLMTask",
+    "Loop",
     "Parallel",
     "PipelineResult",
     "PipelineStep",
