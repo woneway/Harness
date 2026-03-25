@@ -26,6 +26,7 @@ from harness.memory import Memory
 from harness.notifier.base import AbstractNotifier
 from harness.runners.base import AbstractRunner
 from harness.runners.claude_cli import ClaudeCliRunner
+from harness.state import State
 from harness.storage.sql import SQLStorage
 from harness.tasks import (
     Dialogue,
@@ -190,6 +191,7 @@ class Harness:
         *,
         name: str | None = None,
         resume_from: str | None = None,
+        state: State | None = None,
     ) -> PipelineResult:
         """执行多步流水线。
 
@@ -197,6 +199,7 @@ class Harness:
             tasks: 任务列表。
             name: 可选名称，存入 runs 表。
             resume_from: 从指定 run_id 续跑，跳过已成功的步骤。
+            state: v2 State 对象；None 时自动创建默认 State。
 
         Returns:
             PipelineResult 包含所有步骤结果。
@@ -221,6 +224,10 @@ class Harness:
         assert self._storage is not None
 
         await self._storage.save_run(run_id, str(self._project_path), name)
+
+        # 初始化 State
+        if state is None:
+            state = State()
 
         # 获取 resume 信息
         skipped_indices: set[str] = set()
@@ -289,6 +296,10 @@ class Harness:
             session_manager.reset()
 
         results: list[Result] = list(resumed_results)
+        # 同步 state._results 与 resumed_results
+        for r in resumed_results:
+            state._append_result(r)
+
         total_tokens = sum(r.tokens_used for r in results)
         start_time = time.monotonic()
 
@@ -330,6 +341,7 @@ class Harness:
                         harness_stream_callback=self._stream_callback,
                         harness_raw_stream_callback=self._raw_stream_callback,
                         env_overrides=self._env_overrides or None,
+                        state=state,
                     )
                     # Bug2 修复：并发 LLMTask 各自使用独立 session，完成后外部
                     # session 已无法确定从哪个子 session 续跑，统一 mark_broken。
@@ -356,6 +368,17 @@ class Harness:
                         )
                         total_tokens += r.tokens_used
                     results.extend(sub_results)
+                    # 同步 state
+                    for r in sub_results:
+                        state._append_result(r)
+                        # Parallel 子任务的 output_key 写入
+                        sub_output_key = getattr(
+                            task.tasks[TaskIndex.parse(r.task_index).par_child_int()]
+                            if r.task_index != task_index else task,
+                            "output_key", None
+                        )
+                        if sub_output_key and r.success:
+                            state._set_output(sub_output_key, r.output)
                     continue
 
                 # 解析有效回调（Task 级覆写 Harness 级）
@@ -386,6 +409,7 @@ class Harness:
                         config=task.config,
                         stream_callback=effective_cb,
                         raw_stream_callback=effective_raw_cb,
+                        output_key=task.output_key,
                     )
                     r = await execute_llm_task(
                         task_with_cb,
@@ -399,6 +423,7 @@ class Harness:
                         memory_injection=memory_injection,
                         storage=self._storage,
                         is_new_session=session_manager.is_broken,
+                        state=state,
                     )
                     # 检查 memory_update
                     if (
@@ -415,17 +440,20 @@ class Harness:
                         task, task_index, results, run_id,
                         harness_config=self._default_config,
                         env_overrides=self._env_overrides,
+                        state=state,
                     )
                 elif isinstance(task, ShellTask):
                     r = await execute_shell_task(
                         task, task_index, results, run_id,
                         harness_config=self._default_config,
                         env_overrides=self._env_overrides,
+                        state=state,
                     )
                 elif isinstance(task, PollingTask):
                     r = await execute_polling(
                         task, task_index, results, run_id,
                         harness_config=self._default_config,
+                        state=state,
                     )
                 elif isinstance(task, Dialogue):
                     r = await execute_dialogue(
@@ -437,6 +465,7 @@ class Harness:
                         harness_runner=self._runner,
                         harness_config=self._default_config,
                         storage=self._storage,
+                        state=state,
                     )
                 else:
                     raise TypeError(f"Unknown task type: {type(task)}")
@@ -455,6 +484,12 @@ class Harness:
                 )
                 total_tokens += r.tokens_used
                 results.append(r)
+
+                # 同步 state
+                state._append_result(r)
+                output_key = getattr(task, "output_key", None)
+                if output_key and r.success:
+                    state._set_output(output_key, r.output)
 
         except TaskFailedError as e:
             # 写失败状态

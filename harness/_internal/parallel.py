@@ -21,6 +21,7 @@ from harness.tasks import (
 if TYPE_CHECKING:
     from harness._internal.session import SessionManager
     from harness.runners.base import AbstractRunner
+    from harness.state import State
     from harness.storage.base import StorageProtocol
 
 
@@ -40,6 +41,7 @@ async def execute_parallel(
     harness_stream_callback: "Callable[[str], None] | None" = None,
     harness_raw_stream_callback: "Callable[[dict], None] | None" = None,
     env_overrides: "dict[str, str] | None" = None,
+    state: "State | None" = None,
 ) -> list[Result]:
     """并发执行 Parallel 块内的所有 Task。
 
@@ -48,6 +50,7 @@ async def execute_parallel(
         outer_index: 该 Parallel 在 pipeline 中的位置索引（整数）。
         results: 前序任务结果列表。
         run_id: 当前 run ID。
+        state: v2 State 对象（Parallel 子任务接收只读快照）。
 
     Returns:
         所有子任务的 Result 列表。
@@ -80,6 +83,7 @@ async def execute_parallel(
             harness_stream_callback=harness_stream_callback,
             harness_raw_stream_callback=harness_raw_stream_callback,
             env_overrides=env_overrides,
+            state=state,
         )
     else:
         # best_effort：一次性构建协程并等待全部完成
@@ -105,6 +109,7 @@ async def execute_parallel(
                 harness_stream_callback=harness_stream_callback,
                 harness_raw_stream_callback=harness_raw_stream_callback,
                 env_overrides=env_overrides,
+                state=state,
             )
             coros.append(coro)
         return await _run_best_effort(coros, task_indices, task_types)
@@ -126,6 +131,7 @@ async def _run_all_or_nothing_with_retry(
     harness_stream_callback: "Callable[[str], None] | None" = None,
     harness_raw_stream_callback: "Callable[[dict], None] | None" = None,
     env_overrides: "dict[str, str] | None" = None,
+    state: "State | None" = None,
 ) -> list[Result]:
     """all_or_nothing 策略：带整块重试上限（parallel.max_retries）的执行。
 
@@ -159,6 +165,7 @@ async def _run_all_or_nothing_with_retry(
                 harness_stream_callback=harness_stream_callback,
                 harness_raw_stream_callback=harness_raw_stream_callback,
                 env_overrides=env_overrides,
+                state=state,
             )
             coros.append(coro)
 
@@ -262,6 +269,7 @@ async def _execute_one(
     harness_stream_callback: "Callable[[str], None] | None" = None,
     harness_raw_stream_callback: "Callable[[dict], None] | None" = None,
     env_overrides: "dict[str, str] | None" = None,
+    state: "State | None" = None,
 ) -> Result:
     """按任务类型派发到对应的 executor 函数。
 
@@ -298,22 +306,27 @@ async def _execute_one(
             memory_injection=memory_injection,
             storage=storage,
             is_new_session=is_new_session,
+            state=state,
         )
     elif isinstance(task, FunctionTask):
         return await execute_function_task(
             task, task_index, results, run_id,
             harness_config=harness_config,
             env_overrides=env_overrides,
+            state=state,
         )
     elif isinstance(task, ShellTask):
         return await execute_shell_task(
             task, task_index, results, run_id,
             harness_config=harness_config,
             env_overrides=env_overrides,
+            state=state,
         )
     elif isinstance(task, PollingTask):
         return await execute_polling(
-            task, task_index, results, run_id, harness_config=harness_config
+            task, task_index, results, run_id,
+            harness_config=harness_config,
+            state=state,
         )
     else:
         raise TypeError(f"Unknown task type: {type(task)}")

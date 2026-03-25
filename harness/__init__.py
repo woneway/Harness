@@ -23,6 +23,7 @@
 from harness.harness import Harness
 from harness.memory import Memory
 from harness.runners.anthropic import AnthropicRunner
+from harness.state import State
 from harness.runners.base import AbstractRunner, RunnerResult
 from harness.runners.openai import OpenAIRunner
 from harness.tasks import (
@@ -43,6 +44,7 @@ from harness.tasks import (
 
 __all__ = [
     "Harness",
+    "State",
     "LLMTask",
     "FunctionTask",
     "ShellTask",

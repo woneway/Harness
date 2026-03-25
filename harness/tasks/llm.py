@@ -19,3 +19,4 @@ class LLMTask(BaseTask):
     system_prompt: str = ""
     output_schema: type[BaseModel] | None = None
     runner: Any | None = None  # AbstractRunner | None，避免循环导入
+    output_key: str | None = None  # v2: 执行后将 result.output 写入 state 属性

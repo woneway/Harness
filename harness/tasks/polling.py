@@ -22,3 +22,4 @@ class PollingTask(BaseTask):
     poll_interval: float = 10.0
     timeout: int = 900
     output_schema: type[BaseModel] | None = None
+    output_key: str | None = None  # v2: 执行后将 result.output 写入 state 属性

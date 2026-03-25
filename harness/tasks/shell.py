@@ -22,3 +22,4 @@ class ShellTask(BaseTask):
     cmd: str | Callable[[list[Result]], str] = ""
     cwd: str | None = None
     env: dict[str, str] | None = None
+    output_key: str | None = None  # v2: 执行后将 result.output 写入 state 属性

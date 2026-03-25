@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from harness._internal.exceptions import TaskFailedError
 from harness.tasks import PollingTask, Result, TaskConfig
+
+if TYPE_CHECKING:
+    from harness.state import State
 
 
 async def execute_polling(
@@ -17,6 +20,7 @@ async def execute_polling(
     run_id: str,
     *,
     harness_config: TaskConfig | None = None,
+    state: "State | None" = None,
 ) -> Result:
     """执行 PollingTask：submit → 循环 poll → 返回最终结果。
 
@@ -35,7 +39,7 @@ async def execute_polling(
         # 若 config.timeout < task.timeout，asyncio.wait_for 优先触发。
         try:
             result, error = await asyncio.wait_for(
-                _run_once(task, task_index, results, run_id, config),
+                _run_once(task, task_index, results, run_id, config, state=state),
                 timeout=config.timeout,
             )
         except asyncio.TimeoutError:
@@ -63,15 +67,22 @@ async def _run_once(
     results: list[Result],
     run_id: str,
     config: TaskConfig,
+    *,
+    state: "State | None" = None,
 ) -> tuple[Result | None, str]:
     """执行一次 submit + poll 循环，成功返回 (Result, "")，失败返回 (None, error_msg)。"""
     from pydantic import ValidationError
 
+    from harness._internal.compat import call_with_compat
+
     start_time = time.monotonic()
 
-    # submit
+    # submit（支持 v1 和 v2 callable 模式）
     try:
-        handle: Any = task.submit_fn(results)
+        if state is not None:
+            handle: Any = call_with_compat(task.submit_fn, state)
+        else:
+            handle = task.submit_fn(results)
     except Exception as e:
         return None, f"submit_fn raised: {e}"
 

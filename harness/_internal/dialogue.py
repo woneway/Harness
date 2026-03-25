@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from harness.runners.base import AbstractRunner
+    from harness.state import State
     from harness.storage.base import StorageProtocol
     from harness.tasks import Result
 
@@ -29,6 +30,7 @@ class DialogueContext:
     background: str                         # Dialogue.background
     history: list[DialogueTurn]             # 本次发言前的所有历史
     pipeline_results: list[Result]          # 上游 pipeline 结果
+    state: "State | None" = None            # v2: pipeline State 对象
 
     def last_from(self, role_name: str) -> str | None:
         """获取指定角色最近一次发言内容，无则返回 None。"""
@@ -55,6 +57,7 @@ async def _execute_turn(
     storage: "StorageProtocol | None",
     run_id: str,
     config: TaskConfig,
+    state: "State | None" = None,
 ) -> "tuple[DialogueTurn, int]":
     """执行单次角色发言，含超时与重试，更新 session，持久化，返回 (DialogueTurn, tokens)。
 
@@ -70,6 +73,7 @@ async def _execute_turn(
         background=dialogue.background,
         history=list(history),
         pipeline_results=list(pipeline_results),
+        state=state,
     )
 
     # prompt callable 异常：不重试，直接抛 TaskFailedError
@@ -182,6 +186,7 @@ async def execute_dialogue(
     harness_runner: "AbstractRunner",
     harness_config: "TaskConfig | None",
     storage: "StorageProtocol | None" = None,
+    state: "State | None" = None,
 ) -> "Result":
     """执行 Dialogue，支持轮次模式和回合模式。
 
@@ -210,7 +215,7 @@ async def execute_dialogue(
                     role.name, task_index, round_num,
                     dialogue, history, pipeline_results,
                     role_sessions, harness_system_prompt, harness_runner,
-                    storage, run_id, config,
+                    storage, run_id, config, state=state,
                 )
                 history.append(turn)
                 total_tokens += turn_tokens
@@ -223,6 +228,7 @@ async def execute_dialogue(
                         background=dialogue.background,
                         history=list(history),
                         pipeline_results=list(pipeline_results),
+                        state=state,
                     )
                     if dialogue.until(check_ctx):
                         done = True
@@ -240,6 +246,7 @@ async def execute_dialogue(
                     background=dialogue.background,
                     history=list(history),
                     pipeline_results=list(pipeline_results),
+                    state=state,
                 )
                 if dialogue.until_round(round_ctx):
                     break
@@ -263,7 +270,7 @@ async def execute_dialogue(
                 next_role_name, task_index, turn_num,
                 dialogue, history, pipeline_results,
                 role_sessions, harness_system_prompt, harness_runner,
-                storage, run_id, config,
+                storage, run_id, config, state=state,
             )
             history.append(turn)
             total_tokens += turn_tokens
@@ -277,6 +284,7 @@ async def execute_dialogue(
                     background=dialogue.background,
                     history=list(history),
                     pipeline_results=list(pipeline_results),
+                    state=state,
                 )
                 if dialogue.until(check_ctx):
                     break

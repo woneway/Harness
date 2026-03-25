@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel, ValidationError
 
+from harness._internal.compat import call_with_compat
 from harness._internal.exceptions import (
     InvalidPipelineError,
     OutputSchemaError,
@@ -20,6 +21,7 @@ from harness._internal.exceptions import (
 )
 from harness._internal.session import SessionManager
 from harness.runners.base import AbstractRunner
+from harness.state import State
 from harness.tasks import (
     FunctionTask,
     LLMTask,
@@ -68,6 +70,7 @@ async def execute_llm_task(
     memory_injection: str,
     storage: "StorageProtocol | None" = None,
     is_new_session: bool = False,
+    state: State | None = None,
 ) -> Result:
     """执行单个 LLMTask，含重试逻辑。"""
     config = _effective_config(task.config, harness_config)
@@ -87,10 +90,13 @@ async def execute_llm_task(
 
     _emit_separator(task_index, "llm", stream_cb, raw_cb)
 
-    # 解析 prompt
+    # 解析 prompt（支持 v1 和 v2 callable 模式）
     try:
         if callable(task.prompt):
-            base_prompt_text = task.prompt(results)
+            if state is not None:
+                base_prompt_text = call_with_compat(task.prompt, state)
+            else:
+                base_prompt_text = task.prompt(results)
         else:
             base_prompt_text = task.prompt
     except Exception as e:
@@ -195,6 +201,7 @@ async def execute_function_task(
     *,
     harness_config: TaskConfig | None,
     env_overrides: dict[str, str] | None = None,
+    state: State | None = None,
 ) -> Result:
     """执行单个 FunctionTask。
 
@@ -219,7 +226,10 @@ async def execute_function_task(
     try:
         while attempt <= config.max_retries:
             try:
-                raw_output = task.fn(results)
+                if state is not None:
+                    raw_output = call_with_compat(task.fn, state)
+                else:
+                    raw_output = task.fn(results)
             except OutputSchemaError:
                 raise  # 直接向上抛，不重试
             except Exception as e:
@@ -267,16 +277,20 @@ async def execute_shell_task(
     *,
     harness_config: TaskConfig | None,
     env_overrides: dict[str, str] | None = None,
+    state: State | None = None,
 ) -> Result:
     """执行单个 ShellTask，非零退出码触发重试。"""
     _emit_separator(task_index, "shell", task.stream_callback, task.raw_stream_callback)
 
     config = _effective_config(task.config, harness_config)
 
-    # 解析 cmd
+    # 解析 cmd（支持 v1 和 v2 callable 模式）
     try:
         if callable(task.cmd):
-            cmd_text = task.cmd(results)
+            if state is not None:
+                cmd_text = call_with_compat(task.cmd, state)
+            else:
+                cmd_text = task.cmd(results)
         else:
             cmd_text = task.cmd
     except Exception as e:
