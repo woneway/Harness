@@ -20,12 +20,14 @@
     from harness.runners.claude_cli import PermissionMode
 """
 
+from harness.agent import Agent
 from harness.harness import Harness
 from harness.memory import Memory
 from harness.runners.anthropic import AnthropicRunner
 from harness.state import State
 from harness.runners.base import AbstractRunner, RunnerResult
 from harness.runners.openai import OpenAIRunner
+from harness.triggers import CronTrigger, EventTrigger, TriggerContext
 from harness.tasks import (
     Condition,
     Dialogue,
@@ -46,7 +48,11 @@ from harness.tasks import (
 
 __all__ = [
     "Harness",
+    "Agent",
     "State",
+    "CronTrigger",
+    "EventTrigger",
+    "TriggerContext",
     "Condition",
     "Loop",
     "LLMTask",

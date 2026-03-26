@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +134,7 @@ class Harness:
 
         self._storage: SQLStorage | None = None
         self._scheduler = None
+        self._service_runner: "ServiceRunner | None" = None
         self._initialized = False
 
     async def _ensure_initialized(self) -> None:
@@ -700,6 +701,51 @@ class Harness:
 
         return r
 
+    def service(
+        self,
+        name: str,
+        triggers: "list[Trigger]",
+        handler: "Callable[[TriggerContext], Awaitable[list[PipelineStep] | PipelineStep]]",
+        *,
+        state_factory: Callable[[], State] | None = None,
+        pipeline_name: str | None = None,
+    ) -> None:
+        """注册长驻服务。
+
+        触发时调用 handler 获取 pipeline steps，然后执行 pipeline()。
+
+        Args:
+            name: 服务名称（唯一）。
+            triggers: 触发器列表（CronTrigger / EventTrigger）。
+            handler: async callable，接收 TriggerContext，
+                     返回 PipelineStep 或 list[PipelineStep]。
+            state_factory: 每次触发时创建新 State 的工厂函数。
+                          None 时使用默认 State()。
+            pipeline_name: pipeline 记录名，None 时自动生成。
+        """
+        from harness._internal.service import ServiceDef, ServiceRunner
+
+        if self._service_runner is None:
+            self._service_runner = ServiceRunner(self)
+
+        self._service_runner.register(ServiceDef(
+            name=name,
+            triggers=triggers,
+            handler=handler,
+            state_factory=state_factory,
+            pipeline_name=pipeline_name,
+        ))
+
+    async def emit(self, event: str, data: Any = None) -> None:
+        """发射事件，触发已注册的 EventTrigger。
+
+        Args:
+            event: 事件名。
+            data: 事件数据，传给 TriggerContext.event_data。
+        """
+        if self._service_runner is not None:
+            await self._service_runner.emit(event, data)
+
     def schedule(
         self,
         tasks: list[PipelineStep],
@@ -724,13 +770,25 @@ class Harness:
         self._scheduler.add_job(_run, cron)
 
     async def start(self) -> None:
-        """启动调度器。"""
+        """启动调度器和服务。"""
         await self._ensure_initialized()
+
+        # service 的 CronTrigger 也需要 scheduler
+        if self._scheduler is None and self._service_runner is not None:
+            from harness.scheduler.apscheduler import APSchedulerBackend
+            self._scheduler = APSchedulerBackend()
+
+        # 注册 service triggers
+        if self._service_runner is not None and self._scheduler is not None:
+            await self._service_runner.start(self._scheduler)
+
         if self._scheduler is not None:
             await self._scheduler.start()
 
     async def stop(self) -> None:
-        """停止调度器。"""
+        """停止服务和调度器。"""
+        if self._service_runner is not None:
+            await self._service_runner.stop()
         if self._scheduler is not None:
             await self._scheduler.stop()
 

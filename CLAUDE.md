@@ -4,8 +4,8 @@
 
 ## 项目状态
 
-**阶段：v2.0 已实现**（370 tests pass，2026-03-25）
-设计文档：`design/v1-design.md`（v1）、`design/v2-architecture.md`（v2 完整蓝图）
+**阶段：v2.1 已实现**（440 tests pass，2026-03-26）
+设计文档：`design/v1-design.md`（v1）、`design/v2-architecture.md`（v2 蓝图）、`design/v2-agent-service-plan.md`（v2.1 方案）
 
 v2.0 新增：
 - `State` 共享状态（替代 `results[N]`）
@@ -13,6 +13,14 @@ v2.0 新增：
 - `Condition` 条件分支 / `Loop` 循环
 - `tasks/` 目录拆分（v1 import 路径仍可用）
 - v1 callable 签名 `fn(results)` 自动兼容
+
+v2.1 新增：
+- `Agent` class-based 持久化角色（对齐 CrewAI/AutoGen/ADK）
+- `Agent.run()` 独立执行 / `Agent.as_role()` 降级为 Dialogue Role
+- `CronTrigger` / `EventTrigger` 触发器
+- `h.service(name, triggers, handler)` 长驻服务模式
+- `h.emit(event, data)` 事件发射
+- EventBus（pyee 可选依赖）
 
 ## 背景
 
@@ -30,7 +38,9 @@ IterationForge 将成为 Harness 的第一个使用方。
 ```python
 from harness import (
     Harness,
+    Agent,                  # v2.1: class-based 持久化角色
     State,                  # v2: 共享状态基类
+    CronTrigger, EventTrigger, TriggerContext,  # v2.1: 触发器
     Condition, Loop,        # v2: 流程控制
     LLMTask, FunctionTask, ShellTask, PollingTask, Parallel,
     Dialogue, Role,         # 多角色辩论循环
@@ -50,6 +60,20 @@ h = Harness(project_path="/path/to/project")
 
 # 单次 LLM 调用
 result = await h.run("分析并修复代码质量问题")
+
+# v2.1: Agent 独立使用
+analyst = Agent(name="analyst", system_prompt="技术分析师", runner=my_runner)
+text = await analyst.run("分析今日走势")
+
+# v2.1: Agent 在 Dialogue 中使用
+trader = Agent(name="trader", system_prompt="短线交易员", runner=my_runner)
+dialogue = Dialogue(
+    roles=[
+        analyst.as_role(lambda ctx: f"分析: {ctx.state.market}"),
+        trader.as_role(lambda ctx: f"回应: {ctx.last_from('analyst')}"),
+    ],
+    max_rounds=3,
+)
 
 # v2: State 模式 pipeline（推荐）
 class MyState(State):
@@ -71,6 +95,19 @@ pr = await h.pipeline([
     ),
 ], state=MyState())
 
+# v2.1: Service 长驻模式
+async def on_trigger(ctx: TriggerContext):
+    return [LLMTask("处理事件", output_key="result")]
+
+h.service("my-service", triggers=[
+    CronTrigger("15 15 * * 1-5"),
+    EventTrigger("alert", filter=lambda d: d["level"] > 3),
+], handler=on_trigger)
+await h.start()
+
+# 外部事件推送
+await h.emit("alert", {"level": 5, "msg": "异常检测"})
+
 # v1: results 模式 pipeline（向后兼容）
 results = await h.pipeline([
     FunctionTask(fn=collect_data),
@@ -91,8 +128,10 @@ await h.start()
 ```
 harness/
   __init__.py          # 公开 API 导出
-  harness.py           # Harness 主类（用户入口）
+  harness.py           # Harness 主类（pipeline/service/start/stop）
+  agent.py             # Agent class-based 角色（v2.1 新增）
   state.py             # State 共享状态基类（v2 新增）
+  triggers.py          # CronTrigger, EventTrigger, TriggerContext（v2.1 新增）
   task.py              # re-export shim → harness.tasks（v1 兼容）
   memory.py            # Memory（历史运行注入 + memory.md）
 
@@ -140,6 +179,8 @@ harness/
     parallel.py        # Parallel 并发执行（asyncio.gather + error_policy）
     polling.py         # PollingTask 轮询循环
     dialogue.py        # Dialogue 多角色执行 + DialogueContext
+    event_bus.py       # EventBus（pyee 封装，v2.1 新增）
+    service.py         # ServiceRunner 服务执行核心（v2.1 新增）
     stream_parser.py   # Claude stream-json 逐行解析
     session.py         # SessionManager（pipeline 内 session 共享）
     exceptions.py      # TaskFailedError / ClaudeNotFoundError / ...
@@ -168,6 +209,10 @@ harness/
 | Parallel 续跑 | 原子单元：块内任意子 task 未成功则整体重跑 |
 | APScheduler v4 | 延迟注册模式：`add_job()` 缓存，`start()` 批量 `await add_schedule()` |
 | ClaudeCliRunner 超时 | `executor.py` 用 `asyncio.wait_for` 触发取消，runner 内 `except CancelledError` → SIGTERM → 5s → SIGKILL |
+| Agent 定位 | 构建块（不是 PipelineStep），通过 `as_role()` 降级到 Dialogue，通过 FunctionTask 进入 pipeline |
+| Service 模式 | `h.service(name, triggers, handler)` 注册；handler 返回 pipeline steps，复用 `h.pipeline()` 执行 |
+| EventBus | pyee 可选依赖（`harness-ai[service]`），仅在有 EventTrigger 时懒初始化 |
+| Service 错误隔离 | 单次触发执行失败（handler 异常/pipeline 异常）不中断服务 |
 
 ## 已知问题（待修复）
 
@@ -187,8 +232,8 @@ pytest tests/ --cov=harness --cov-report=term-missing
 ```
 
 测试分布：
-- `tests/unit/`：exceptions, executor, harness, memory, parallel, polling, stream_parser, task, state, compat, state_executor, task_index, condition, loop, tasks_split
-- `tests/integration/`：pipeline（端到端，不需要 Claude CLI）、storage（SQLite 读写）、state_pipeline
+- `tests/unit/`：exceptions, executor, harness, memory, parallel, polling, stream_parser, task, state, compat, state_executor, task_index, condition, loop, tasks_split, agent, triggers, event_bus, service_runner
+- `tests/integration/`：pipeline, storage, state_pipeline, agent_pipeline, service
 
 ## 示例
 
