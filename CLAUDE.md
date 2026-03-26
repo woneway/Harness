@@ -4,7 +4,7 @@
 
 ## 项目状态
 
-**阶段：v2.1 已实现**（440 tests pass，2026-03-26）
+**阶段：v2.1 已实现**（457 tests pass，2026-03-26）
 设计文档：`design/v1-design.md`（v1）、`design/v2-architecture.md`（v2 蓝图）、`design/v2-agent-service-plan.md`（v2.1 方案）
 
 v2.0 新增：
@@ -17,6 +17,7 @@ v2.0 新增：
 v2.1 新增：
 - `Agent` class-based 持久化角色（对齐 CrewAI/AutoGen/ADK）
 - `Agent.run()` 独立执行 / `Agent.as_role()` 降级为 Dialogue Role
+- Agent 结构化角色定义：`description/goal/backstory/constraints` + `build_system_prompt()`
 - `CronTrigger` / `EventTrigger` 触发器
 - `h.service(name, triggers, handler)` 长驻服务模式
 - `h.emit(event, data)` 事件发射
@@ -61,9 +62,20 @@ h = Harness(project_path="/path/to/project")
 # 单次 LLM 调用
 result = await h.run("分析并修复代码质量问题")
 
-# v2.1: Agent 独立使用
+# v2.1: Agent 独立使用（方式一：直接 system_prompt）
 analyst = Agent(name="analyst", system_prompt="技术分析师", runner=my_runner)
 text = await analyst.run("分析今日走势")
+
+# v2.1: Agent 结构化定义（方式二：description/goal/backstory/constraints）
+analyst = Agent(
+    name="龙头猎手",
+    description="辨识龙头的短线选手。",
+    goal="抓住每日龙头股",
+    backstory="从涨停板战法起家，擅长辨识市场主线。",
+    constraints=["只做龙头", "不碰垃圾股"],
+    runner=my_runner,
+)
+text = await analyst.run("分析今日走势")  # build_system_prompt() 自动组装
 
 # v2.1: Agent 在 Dialogue 中使用
 trader = Agent(name="trader", system_prompt="短线交易员", runner=my_runner)
@@ -129,7 +141,7 @@ await h.start()
 harness/
   __init__.py          # 公开 API 导出
   harness.py           # Harness 主类（pipeline/service/start/stop）
-  agent.py             # Agent class-based 角色（v2.1 新增）
+  agent.py             # Agent class-based 角色 + 结构化定义（v2.1）
   state.py             # State 共享状态基类（v2 新增）
   triggers.py          # CronTrigger, EventTrigger, TriggerContext（v2.1 新增）
   task.py              # re-export shim → harness.tasks（v1 兼容）
@@ -210,6 +222,7 @@ harness/
 | APScheduler v4 | 延迟注册模式：`add_job()` 缓存，`start()` 批量 `await add_schedule()` |
 | ClaudeCliRunner 超时 | `executor.py` 用 `asyncio.wait_for` 触发取消，runner 内 `except CancelledError` → SIGTERM → 5s → SIGKILL |
 | Agent 定位 | 构建块（不是 PipelineStep），通过 `as_role()` 降级到 Dialogue，通过 FunctionTask 进入 pipeline |
+| Agent system_prompt | 两种互斥方式：①直接传 `system_prompt`（优先级最高）②结构化 `description/goal/backstory/constraints`，`build_system_prompt()` 组装 |
 | Service 模式 | `h.service(name, triggers, handler)` 注册；handler 返回 pipeline steps，复用 `h.pipeline()` 执行 |
 | EventBus | pyee 可选依赖（`harness-ai[service]`），仅在有 EventTrigger 时懒初始化 |
 | Service 错误隔离 | 单次触发执行失败（handler 异常/pipeline 异常）不中断服务 |
@@ -242,4 +255,5 @@ uv run python examples/code_stats/main.py               # 统计代码量（Func
 uv run python examples/analyze_harness/main.py          # 分析 → 优化 → 复盘（三阶段 pipeline）
 uv run python examples/research_report/main.py Clawith  # 联网调研报告（多 LLMTask + FunctionTask）
 uv run python examples/video_pipeline/main.py           # LLMTask + Parallel[PollingTask×2] + FunctionTask
+uv run python examples/stock_traders/main.py            # 多游资盘中讨论选股（Agent 结构化角色 + Dialogue）
 ```

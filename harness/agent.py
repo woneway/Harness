@@ -27,14 +27,45 @@ class Agent:
     1. 独立执行：``await agent.run("分析走势")``
     2. 降级为 Role：``agent.as_role(lambda ctx: "...")``
     3. 在 pipeline 中：``FunctionTask(fn=lambda s: agent.run(...))``
+
+    系统提示词支持两种方式（互斥）：
+    - 方式一：直接传 ``system_prompt``（优先级最高）
+    - 方式二：结构化定义 ``description/goal/backstory/constraints``，
+      由 ``build_system_prompt()`` 自动组装
     """
 
     name: str
-    system_prompt: str
+    system_prompt: str = ""
     runner: AbstractRunner | None = None
 
     # 预留字段，本次不实现执行逻辑
     tools: list[Any] = field(default_factory=list)
+
+    # 结构化角色定义（方式二）
+    description: str = ""
+    goal: str = ""
+    backstory: str = ""
+    constraints: list[str] = field(default_factory=list)
+
+    def build_system_prompt(self) -> str:
+        """构建系统提示词。
+
+        system_prompt 非空时直接返回；否则从结构化字段组装。
+        """
+        if self.system_prompt:
+            return self.system_prompt
+        parts: list[str] = []
+        if self.description:
+            parts.append(f"# 角色\n你是{self.name}。{self.description}")
+        else:
+            parts.append(f"# 角色\n你是{self.name}。")
+        if self.goal:
+            parts.append(f"# 目标\n{self.goal}")
+        if self.backstory:
+            parts.append(f"# 背景\n{self.backstory}")
+        if self.constraints:
+            parts.append("# 行为约束\n" + "\n".join(f"- {c}" for c in self.constraints))
+        return "\n\n".join(parts)
 
     async def run(
         self,
@@ -80,7 +111,7 @@ class Agent:
 
         result = await self.runner.execute(
             prompt_text,
-            system_prompt=self.system_prompt,
+            system_prompt=self.build_system_prompt(),
             session_id=None,
             **kwargs,
         )
@@ -96,7 +127,7 @@ class Agent:
 
         return Role(
             name=self.name,
-            system_prompt=self.system_prompt,
+            system_prompt=self.build_system_prompt(),
             prompt=prompt,
             runner=self.runner,
         )

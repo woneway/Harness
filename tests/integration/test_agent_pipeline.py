@@ -117,3 +117,67 @@ class TestAgentInPipeline:
         assert len(pr.results) == 2
         assert pr.results[0].output == "prepared data"
         assert pr.results[1].success
+
+    @pytest.mark.asyncio
+    async def test_structured_agent_in_dialogue(self, tmp_path: Path) -> None:
+        """结构化 Agent 在 Dialogue 中正常工作。"""
+
+        class SpCapturingRunner(AbstractRunner):
+            def __init__(self) -> None:
+                self.system_prompts: list[str] = []
+
+            async def execute(self, prompt, *, system_prompt, session_id, **kwargs) -> RunnerResult:
+                self.system_prompts.append(system_prompt)
+                return RunnerResult(text="mock", tokens_used=5, session_id="s1")
+
+        runner = SpCapturingRunner()
+        agent = Agent(
+            name="龙头猎手",
+            description="辨识龙头的短线选手。",
+            goal="抓住每日龙头股",
+            runner=runner,
+        )
+
+        h = Harness(str(tmp_path), runner=runner)
+        pr = await h.pipeline([
+            Dialogue(
+                roles=[agent.as_role(lambda ctx: "分析龙头")],
+                max_rounds=1,
+            ),
+        ])
+
+        assert pr.results[0].success
+        # 验证 Dialogue 中实际使用了 build_system_prompt 生成的内容
+        assert any("你是龙头猎手。辨识龙头的短线选手。" in sp for sp in runner.system_prompts)
+        assert any("# 目标\n抓住每日龙头股" in sp for sp in runner.system_prompts)
+
+    @pytest.mark.asyncio
+    async def test_mixed_old_new_agents_in_dialogue(self, tmp_path: Path) -> None:
+        """新旧风格 Agent 混用在同一 Dialogue。"""
+        runner = MockRunner("mock dialogue")
+
+        # 旧风格：直接 system_prompt
+        old_agent = Agent(name="old_style", system_prompt="I am old style", runner=runner)
+        # 新风格：结构化字段
+        new_agent = Agent(
+            name="new_style",
+            description="结构化定义的角色。",
+            goal="验证混用",
+            runner=runner,
+        )
+
+        h = Harness(str(tmp_path), runner=runner)
+        pr = await h.pipeline([
+            Dialogue(
+                roles=[
+                    old_agent.as_role(lambda ctx: "old says"),
+                    new_agent.as_role(lambda ctx: "new says"),
+                ],
+                max_rounds=1,
+            ),
+        ])
+
+        assert pr.results[0].success
+        output = pr.results[0].output
+        assert isinstance(output, DialogueOutput)
+        assert output.total_turns == 2

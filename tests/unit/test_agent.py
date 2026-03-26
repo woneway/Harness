@@ -178,3 +178,170 @@ class TestAgentAsRole:
         r1 = a.as_role(lambda ctx: "prompt1")
         r2 = a.as_role(lambda ctx: "prompt2")
         assert r1.prompt is not r2.prompt
+
+
+# ---------------------------------------------------------------------------
+# build_system_prompt()
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSystemPrompt:
+    def test_system_prompt_takes_priority(self) -> None:
+        """system_prompt 非空时直接返回，忽略结构化字段。"""
+        a = Agent(
+            name="test",
+            system_prompt="direct prompt",
+            description="should be ignored",
+            goal="should be ignored",
+        )
+        assert a.build_system_prompt() == "direct prompt"
+
+    def test_name_only(self) -> None:
+        """只有 name，无结构化字段。"""
+        a = Agent(name="分析师")
+        assert a.build_system_prompt() == "# 角色\n你是分析师。"
+
+    def test_description(self) -> None:
+        """name + description。"""
+        a = Agent(name="分析师", description="专注技术分析的短线交易员。")
+        result = a.build_system_prompt()
+        assert "# 角色" in result
+        assert "你是分析师。专注技术分析的短线交易员。" in result
+
+    def test_goal(self) -> None:
+        """name + goal。"""
+        a = Agent(name="trader", goal="最大化短期收益")
+        result = a.build_system_prompt()
+        assert "# 目标\n最大化短期收益" in result
+
+    def test_backstory(self) -> None:
+        """name + backstory。"""
+        a = Agent(name="trader", backstory="10年游资经验")
+        result = a.build_system_prompt()
+        assert "# 背景\n10年游资经验" in result
+
+    def test_constraints(self) -> None:
+        """name + constraints。"""
+        a = Agent(name="trader", constraints=["不追高", "严格止损"])
+        result = a.build_system_prompt()
+        assert "# 行为约束" in result
+        assert "- 不追高" in result
+        assert "- 严格止损" in result
+
+    def test_all_structured_fields(self) -> None:
+        """所有结构化字段组合。"""
+        a = Agent(
+            name="龙头猎手",
+            description="辨识龙头的短线选手。",
+            goal="抓住每日龙头股",
+            backstory="从涨停板战法起家，擅长辨识市场主线。",
+            constraints=["只做龙头", "不碰垃圾股"],
+        )
+        result = a.build_system_prompt()
+        assert result.startswith("# 角色\n你是龙头猎手。辨识龙头的短线选手。")
+        assert "# 目标\n抓住每日龙头股" in result
+        assert "# 背景\n从涨停板战法起家" in result
+        assert "# 行为约束\n- 只做龙头\n- 不碰垃圾股" in result
+        # 各段落以双换行分隔
+        assert "\n\n# 目标" in result
+        assert "\n\n# 背景" in result
+        assert "\n\n# 行为约束" in result
+
+    def test_empty_constraints_omitted(self) -> None:
+        """空 constraints 列表不生成约束段落。"""
+        a = Agent(name="a", constraints=[])
+        assert "行为约束" not in a.build_system_prompt()
+
+
+# ---------------------------------------------------------------------------
+# run() with structured fields
+# ---------------------------------------------------------------------------
+
+
+class TestAgentRunWithStructuredFields:
+    @pytest.mark.asyncio
+    async def test_run_uses_build_system_prompt(self) -> None:
+        """run() 使用 build_system_prompt() 而非 self.system_prompt。"""
+        runner = CapturingRunner()
+        a = Agent(
+            name="分析师",
+            description="技术分析专家。",
+            goal="精准判断买卖点",
+            runner=runner,
+        )
+        await a.run("hello")
+        sp = runner.calls[0]["system_prompt"]
+        assert "你是分析师。技术分析专家。" in sp
+        assert "# 目标\n精准判断买卖点" in sp
+
+    @pytest.mark.asyncio
+    async def test_run_system_prompt_priority_over_structured(self) -> None:
+        """system_prompt 非空时 run() 用它而非结构化字段。"""
+        runner = CapturingRunner()
+        a = Agent(
+            name="a",
+            system_prompt="direct",
+            description="ignored",
+            runner=runner,
+        )
+        await a.run("hello")
+        assert runner.calls[0]["system_prompt"] == "direct"
+
+
+# ---------------------------------------------------------------------------
+# as_role() with structured fields
+# ---------------------------------------------------------------------------
+
+
+class TestAgentAsRoleWithStructuredFields:
+    def test_as_role_uses_build_system_prompt(self) -> None:
+        """as_role() 生成的 Role 使用 build_system_prompt()。"""
+        a = Agent(
+            name="trader",
+            description="激进短线手。",
+            goal="打板",
+            runner=MockRunner(),
+        )
+        role = a.as_role(lambda ctx: "p")
+        assert "你是trader。激进短线手。" in role.system_prompt
+        assert "# 目标\n打板" in role.system_prompt
+
+    def test_as_role_system_prompt_priority(self) -> None:
+        """system_prompt 非空时 as_role() 用它。"""
+        a = Agent(name="a", system_prompt="direct sp", description="ignored")
+        role = a.as_role(lambda ctx: "p")
+        assert role.system_prompt == "direct sp"
+
+
+# ---------------------------------------------------------------------------
+# Agent 创建（增强字段）
+# ---------------------------------------------------------------------------
+
+
+class TestAgentCreationEnhanced:
+    def test_structured_fields_default_empty(self) -> None:
+        a = Agent(name="a")
+        assert a.system_prompt == ""
+        assert a.description == ""
+        assert a.goal == ""
+        assert a.backstory == ""
+        assert a.constraints == []
+
+    def test_structured_fields_assignment(self) -> None:
+        a = Agent(
+            name="x",
+            description="d",
+            goal="g",
+            backstory="b",
+            constraints=["c1", "c2"],
+        )
+        assert a.description == "d"
+        assert a.goal == "g"
+        assert a.backstory == "b"
+        assert a.constraints == ["c1", "c2"]
+
+    def test_constraints_isolated_between_instances(self) -> None:
+        a1 = Agent(name="a1")
+        a2 = Agent(name="a2")
+        a1.constraints.append("no_chase")
+        assert a2.constraints == []
