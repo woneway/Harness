@@ -399,6 +399,7 @@ class Harness:
                         memory_injection=memory_injection,
                         storage=self._storage,
                         is_new_session=session_manager.is_broken,
+                        env_overrides=self._env_overrides,
                     )
                     # 检查 memory_update
                     if (

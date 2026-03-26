@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from harness.storage.base import StorageProtocol
@@ -114,6 +117,15 @@ class Memory:
         try:
             current = memory_path.read_text(encoding="utf-8")
             if len(current) > threshold:
+                truncated_chars = len(current) - threshold
+                logger.warning(
+                    "memory file %s exceeded threshold (%d > %d chars), "
+                    "truncating oldest %d chars",
+                    memory_path,
+                    len(current),
+                    threshold,
+                    truncated_chars,
+                )
                 # 从末尾保留 threshold 个字符（保留最近内容）
                 memory_path.write_text(current[-threshold:], encoding="utf-8")
         except Exception:
