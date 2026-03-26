@@ -743,36 +743,7 @@ harness/
 
 ---
 
-## 十三、与 IterationForge 的关系
-
-```python
-from harness import Harness, LLMTask, Memory  # Task 别名也可用
-from harness.notifier.telegram import TelegramNotifier
-
-class ScanResult(BaseModel):
-    issues: list[str]
-    summary: str
-
-h = Harness(
-    project_path="/path/to/project",
-    memory=Memory(history_runs=5),
-    notifier=TelegramNotifier(bot_token=..., chat_id=...),
-)
-
-h.schedule(
-    tasks=[
-        LLMTask("扫描项目，输出问题列表", output_schema=ScanResult),
-        LLMTask(lambda ctx: f"修复高优先级问题：{ctx[0].output.issues}"),
-        LLMTask("运行测试，验证结果，更新 .harness/memory.md"),
-    ],
-    cron="0 2 * * *",
-)
-await h.start()
-```
-
----
-
-## 十四、元信息
+## 十三、元信息
 
 | 项目 | 决策 |
 |------|------|
@@ -787,7 +758,7 @@ await h.start()
 
 ---
 
-## 十五、实现状态（v1 已完成）
+## 十四、实现状态（v1 已完成）
 
 所有模块已实现，206 tests pass（2026-03-22）。详细实现记录见 `design/PLAN.md`（历史存档）。
 

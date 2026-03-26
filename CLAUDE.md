@@ -9,8 +9,7 @@
 
 ## 背景
 
-从 IterationForge（`~/ai/projects/iterationforge`）提取通用编排能力，作为独立开源项目。
-IterationForge 将成为 Harness 的第一个使用方。
+Claude CLI 优先的通用 AI Workflow 编排框架，独立开源项目。
 
 ## 核心定位
 
