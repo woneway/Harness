@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import AsyncIterator
+
 import httpx
 
 
@@ -19,3 +22,20 @@ def raise_for_status(resp: httpx.Response, service: str) -> None:
         except Exception:
             detail = f"HTTP {resp.status_code}"
         raise RuntimeError(f"{service} API error {resp.status_code}: {detail}")
+
+
+async def iter_sse_events(lines: AsyncIterator[str]) -> AsyncIterator[dict]:
+    """从 SSE 行流中解析 JSON 事件，跳过非 data 行和 [DONE] 标记。
+
+    用于 OpenAI / Anthropic 等 SSE 流式 API 的共享解析逻辑。
+    """
+    async for line in lines:
+        if not line.startswith("data: "):
+            continue
+        data_str = line[6:]
+        if data_str == "[DONE]":
+            break
+        try:
+            yield json.loads(data_str)
+        except json.JSONDecodeError:
+            continue

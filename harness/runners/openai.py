@@ -18,7 +18,7 @@ from typing import Callable
 
 import httpx
 
-from harness.runners._http import raise_for_status, safe_schema_name
+from harness.runners._http import iter_sse_events, raise_for_status, safe_schema_name
 from harness.runners.base import AbstractRunner, RunnerResult
 
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
@@ -154,16 +154,7 @@ class OpenAIRunner(AbstractRunner):
 
         async with client.stream("POST", url, json=stream_payload, headers=headers) as resp:
             raise_for_status(resp, "OpenAI")
-            async for line in resp.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data_str = line[6:]
-                if data_str == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
+            async for chunk in iter_sse_events(resp.aiter_lines()):
                 choices = chunk.get("choices") or []
                 if choices:
                     delta = choices[0].get("delta") or {}

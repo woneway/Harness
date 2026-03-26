@@ -53,11 +53,20 @@ class ClaudeCliRunner(AbstractRunner):
         self._claude_path: str | None = None
         self._checked = False
 
-    def _get_subprocess_env(self) -> dict[str, str]:
-        """构建子进程环境变量，移除 Claude Code 相关变量。"""
+    def _get_subprocess_env(
+        self,
+        env_overrides: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        """构建子进程环境变量，移除 Claude Code 相关变量并应用覆写。"""
         env = dict(os.environ)
         for key in _ENV_VARS_TO_REMOVE:
             env.pop(key, None)
+        if env_overrides:
+            for key, val in env_overrides.items():
+                if val == "":
+                    env.pop(key, None)
+                else:
+                    env[key] = val
         return env
 
     async def _ensure_claude(self) -> str:
@@ -101,6 +110,7 @@ class ClaudeCliRunner(AbstractRunner):
         output_schema_json: str | None = None,
         stream_callback: Callable[[str], None] | None = None,
         raw_stream_callback: Callable[[dict], None] | None = None,
+        env_overrides: dict[str, str] | None = None,
         **kwargs: object,
     ) -> RunnerResult:
         """调用 Claude Code CLI 执行 prompt。
@@ -112,6 +122,7 @@ class ClaudeCliRunner(AbstractRunner):
             output_schema_json: JSON Schema 字符串，传给 --json-schema 参数。
             stream_callback: 接收解析后文本片段的回调。
             raw_stream_callback: 接收原始 event dict 的回调。
+            env_overrides: 额外环境变量覆写，空值表示删除。
         """
         claude_path = await self._ensure_claude()
 
@@ -136,7 +147,7 @@ class ClaudeCliRunner(AbstractRunner):
 
         args += ["-p", prompt]
 
-        env = self._get_subprocess_env()
+        env = self._get_subprocess_env(env_overrides)
 
         proc = await asyncio.create_subprocess_exec(
             *args,

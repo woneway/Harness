@@ -33,6 +33,19 @@ from harness.task import (
 if TYPE_CHECKING:
     from harness.storage.base import StorageProtocol
 
+# 保护 os.environ 并发修改，防止 Parallel 内多个 FunctionTask 竞态。
+# 每个事件循环绑定独立 Lock，避免跨 loop 共享导致 RuntimeError。
+_env_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_env_lock() -> asyncio.Lock:
+    """获取当前事件循环绑定的 env_lock。"""
+    loop = asyncio.get_running_loop()
+    loop_id = id(loop)
+    if loop_id not in _env_locks:
+        _env_locks[loop_id] = asyncio.Lock()
+    return _env_locks[loop_id]
+
 
 def _effective_config(
     task_config: TaskConfig | None,
@@ -68,6 +81,7 @@ async def execute_llm_task(
     memory_injection: str,
     storage: "StorageProtocol | None" = None,
     is_new_session: bool = False,
+    env_overrides: dict[str, str] | None = None,
 ) -> Result:
     """执行单个 LLMTask，含重试逻辑。"""
     config = _effective_config(task.config, harness_config)
@@ -138,6 +152,7 @@ async def execute_llm_task(
                     output_schema_json=schema_json,
                     stream_callback=stream_cb,
                     raw_stream_callback=raw_cb,
+                    env_overrides=env_overrides,
                 ),
                 timeout=config.timeout,
             )
@@ -207,52 +222,55 @@ async def execute_function_task(
     attempt = 0
     last_error = ""
 
-    _orig_env: dict[str, str | None] = {}
-    if env_overrides:
-        for key, val in env_overrides.items():
-            _orig_env[key] = os.environ.get(key)
-            if val == "":
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = val
-
-    try:
-        while attempt <= config.max_retries:
-            try:
-                raw_output = task.fn(results)
-            except OutputSchemaError:
-                raise  # 直接向上抛，不重试
-            except Exception as e:
-                last_error = str(e)
-                attempt += 1
-                if attempt <= config.max_retries:
-                    wait = config.backoff_base ** (attempt - 1)
-                    await asyncio.sleep(wait)
-                continue
-
-            # output_schema 校验：失败抛 OutputSchemaError，不重试
-            if task.output_schema is not None:
-                if not isinstance(raw_output, task.output_schema):
-                    raise OutputSchemaError(task_index, task.output_schema, type(raw_output))
-
-            duration = time.monotonic() - start_time
-            return Result(
-                task_index=task_index,
-                task_type="function",
-                output=raw_output,
-                raw_text=None,
-                tokens_used=0,
-                duration_seconds=duration,
-                success=True,
-                error=None,
-            )
-    finally:
+    # env_overrides 用 asyncio.Lock 保护，防止 Parallel 内多个 FunctionTask 并发修改
+    # os.environ 导致竞态条件。Lock 确保同一时刻只有一个 FunctionTask 修改全局环境。
+    async with _get_env_lock():
+        _orig_env: dict[str, str | None] = {}
         if env_overrides:
-            for key, orig_val in _orig_env.items():
-                if orig_val is None:
+            for key, val in env_overrides.items():
+                _orig_env[key] = os.environ.get(key)
+                if val == "":
                     os.environ.pop(key, None)
                 else:
-                    os.environ[key] = orig_val
+                    os.environ[key] = val
+
+        try:
+            while attempt <= config.max_retries:
+                try:
+                    raw_output = task.fn(results)
+                except OutputSchemaError:
+                    raise  # 直接向上抛，不重试
+                except Exception as e:
+                    last_error = str(e)
+                    attempt += 1
+                    if attempt <= config.max_retries:
+                        wait = config.backoff_base ** (attempt - 1)
+                        await asyncio.sleep(wait)
+                    continue
+
+                # output_schema 校验：失败抛 OutputSchemaError，不重试
+                if task.output_schema is not None:
+                    if not isinstance(raw_output, task.output_schema):
+                        raise OutputSchemaError(task_index, task.output_schema, type(raw_output))
+
+                duration = time.monotonic() - start_time
+                return Result(
+                    task_index=task_index,
+                    task_type="function",
+                    output=raw_output,
+                    raw_text=None,
+                    tokens_used=0,
+                    duration_seconds=duration,
+                    success=True,
+                    error=None,
+                )
+        finally:
+            if env_overrides:
+                for key, orig_val in _orig_env.items():
+                    if orig_val is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = orig_val
 
     raise TaskFailedError(
         run_id, task_index, "function", last_error, partial_results=list(results)

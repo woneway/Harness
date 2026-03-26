@@ -172,6 +172,7 @@ class Parallel(BaseTask):
     )
     error_policy: Literal["all_or_nothing", "best_effort"] = "all_or_nothing"
     max_retries: int = 2
+    max_concurrency: int | None = None  # None = 无限制，>0 = semaphore 限制并发数
 
     def __post_init__(self) -> None:
         # 用户写 Parallel([task_a, task_b]) 时，list 会落到继承自 BaseTask 的

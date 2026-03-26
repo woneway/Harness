@@ -18,7 +18,7 @@ from typing import Callable
 
 import httpx
 
-from harness.runners._http import raise_for_status, safe_schema_name
+from harness.runners._http import iter_sse_events, raise_for_status, safe_schema_name
 from harness.runners.base import AbstractRunner, RunnerResult
 
 _API_URL = "https://api.anthropic.com/v1/messages"
@@ -168,14 +168,7 @@ class AnthropicRunner(AbstractRunner):
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             async with client.stream("POST", _API_URL, json=stream_payload, headers=headers) as resp:
                 raise_for_status(resp, "Anthropic")
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    try:
-                        event = json.loads(line[6:])
-                    except json.JSONDecodeError:
-                        continue
-
+                async for event in iter_sse_events(resp.aiter_lines()):
                     etype = event.get("type")
 
                     if etype == "message_start":

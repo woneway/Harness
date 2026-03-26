@@ -64,6 +64,11 @@ async def execute_parallel(
                 f"Found Parallel inside Parallel at index {outer_index}."
             )
 
+    # 并发限制：max_concurrency > 0 时使用 semaphore
+    semaphore: asyncio.Semaphore | None = None
+    if parallel.max_concurrency is not None and parallel.max_concurrency > 0:
+        semaphore = asyncio.Semaphore(parallel.max_concurrency)
+
     if parallel.error_policy == "all_or_nothing":
         return await _run_all_or_nothing_with_retry(
             parallel,
@@ -80,6 +85,7 @@ async def execute_parallel(
             harness_stream_callback=harness_stream_callback,
             harness_raw_stream_callback=harness_raw_stream_callback,
             env_overrides=env_overrides,
+            semaphore=semaphore,
         )
     else:
         # best_effort：一次性构建协程并等待全部完成
@@ -106,8 +112,16 @@ async def execute_parallel(
                 harness_raw_stream_callback=harness_raw_stream_callback,
                 env_overrides=env_overrides,
             )
-            coros.append(coro)
+            coros.append(_with_semaphore(coro, semaphore))
         return await _run_best_effort(coros, task_indices, task_types)
+
+
+async def _with_semaphore(coro: Any, semaphore: asyncio.Semaphore | None) -> Any:
+    """用 semaphore 包装协程，限制并发数。semaphore=None 时直接执行。"""
+    if semaphore is None:
+        return await coro
+    async with semaphore:
+        return await coro
 
 
 async def _run_all_or_nothing_with_retry(
@@ -126,6 +140,7 @@ async def _run_all_or_nothing_with_retry(
     harness_stream_callback: "Callable[[str], None] | None" = None,
     harness_raw_stream_callback: "Callable[[dict], None] | None" = None,
     env_overrides: "dict[str, str] | None" = None,
+    semaphore: asyncio.Semaphore | None = None,
 ) -> list[Result]:
     """all_or_nothing 策略：带整块重试上限（parallel.max_retries）的执行。
 
@@ -160,7 +175,7 @@ async def _run_all_or_nothing_with_retry(
                 harness_raw_stream_callback=harness_raw_stream_callback,
                 env_overrides=env_overrides,
             )
-            coros.append(coro)
+            coros.append(_with_semaphore(coro, semaphore))
 
         try:
             return await _run_all_or_nothing(coros, run_id, outer_index)
@@ -298,6 +313,7 @@ async def _execute_one(
             memory_injection=memory_injection,
             storage=storage,
             is_new_session=is_new_session,
+            env_overrides=env_overrides,
         )
     elif isinstance(task, FunctionTask):
         return await execute_function_task(
