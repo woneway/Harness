@@ -4,7 +4,7 @@
 
 ## 项目状态
 
-**阶段：v2.1 已实现**（457 tests pass，2026-03-26）
+**阶段：v2.2 已实现**（523 tests pass，2026-03-26）
 设计文档：`design/v1-design.md`（v1）、`design/v2-architecture.md`（v2 蓝图）、`design/v2-agent-service-plan.md`（v2.1 方案）
 
 v2.0 新增：
@@ -22,6 +22,14 @@ v2.1 新增：
 - `h.service(name, triggers, handler)` 长驻服务模式
 - `h.emit(event, data)` 事件发射
 - EventBus（pyee 可选依赖）
+
+v2.2 新增：
+- `Discussion` 多 Agent 结构化讨论（立场演变 + 共识检测）
+- `DiscussionTurn` / `DiscussionOutput` / `DiscussionProgressEvent` 数据类
+- `position_schema` 必填：定义每个 Agent 的结构化立场
+- 收敛工具函数：`all_agree_on` / `positions_stable` / `majority_agree_on`
+- `Agent.task()` 便捷方法：创建已配置 system_prompt 和 runner 的 LLMTask
+- TaskIndex `disc_round` kind（格式 `"N.gR.A"`）
 
 ## 背景
 
@@ -44,8 +52,12 @@ from harness import (
     CronTrigger, EventTrigger, TriggerContext,  # v2.1: 触发器
     Condition, Loop,        # v2: 流程控制
     LLMTask, FunctionTask, ShellTask, PollingTask, Parallel,
-    Dialogue, Role,         # 多角色辩论循环
+    Dialogue, Role,         # 多角色对话循环
     DialogueProgressEvent,  # Dialogue.progress_callback 接收的结构化事件
+    Discussion,             # v2.2: 多 Agent 结构化讨论
+    DiscussionOutput,       # Discussion 结果（含立场演变）
+    DiscussionTurn,         # 单次发言记录（含结构化立场）
+    DiscussionProgressEvent,# Discussion.progress_callback 事件
     Task,                   # LLMTask 的已废弃别名（v2 移除）
     Result, PipelineResult,
     TaskConfig, Memory,
@@ -55,6 +67,7 @@ from harness import (
     OpenAIRunner,                   # OpenAI-compatible API（MiniMax、DeepSeek 等）
     AnthropicRunner,                # Anthropic Messages API（非 CLI）
 )
+from harness.tasks.discussion import all_agree_on, positions_stable, majority_agree_on  # 收敛工具
 from harness.runners.claude_cli import PermissionMode  # 不在顶层导出
 
 h = Harness(project_path="/path/to/project")
@@ -86,6 +99,34 @@ dialogue = Dialogue(
     ],
     max_rounds=3,
 )
+
+# v2.2: Discussion 结构化讨论（立场演变 + 共识检测）
+from pydantic import BaseModel
+
+class TradingPosition(BaseModel):
+    top_pick: str
+    direction: str
+    confidence: float
+
+analyst = Agent(name="技术分析师", description="看K线", runner=my_runner)
+trader = Agent(name="短线交易员", description="盘中选股", runner=my_runner)
+
+pr = await h.pipeline([
+    Discussion(
+        agents=[analyst, trader],
+        position_schema=TradingPosition,
+        topic="下午盘选股",
+        background=lambda state: f"行情：{state.market}",
+        max_rounds=4,
+        convergence=all_agree_on("top_pick"),
+        output_key="discussion",
+    ),
+])
+output = pr.results[0].output  # DiscussionOutput
+# output.converged, output.final_positions, output.position_history
+
+# v2.2: Agent.task() 便捷方法
+task = analyst.task("分析走势", output_key="analysis")  # 返回 LLMTask
 
 # v2: State 模式 pipeline（推荐）
 class MyState(State):
@@ -158,6 +199,7 @@ harness/
     polling.py         # PollingTask（含 output_key）
     parallel.py        # Parallel
     dialogue.py        # Dialogue, Role, DialogueTurn, DialogueOutput
+    discussion.py      # Discussion, DiscussionOutput, DiscussionTurn, 收敛工具（v2.2 新增）
     condition.py       # Condition（v2 新增）
     loop.py            # Loop（v2 新增）
     types.py           # PipelineStep union 类型别名
@@ -191,6 +233,7 @@ harness/
     parallel.py        # Parallel 并发执行（asyncio.gather + error_policy）
     polling.py         # PollingTask 轮询循环
     dialogue.py        # Dialogue 多角色执行 + DialogueContext
+    discussion.py      # Discussion 执行引擎 + DiscussionContext（v2.2 新增）
     event_bus.py       # EventBus（pyee 封装，v2.1 新增）
     service.py         # ServiceRunner 服务执行核心（v2.1 新增）
     stream_parser.py   # Claude stream-json 逐行解析
@@ -208,10 +251,16 @@ harness/
 | 默认存储 | SQLite + WAL，路径 `{project_path}/.harness/harness.db` |
 | 默认权限 | `PermissionMode.BYPASS`（无人值守） |
 | `run()` | `pipeline([single_LLMTask])` 语法糖 |
-| task_index | 字符串，顺序：`"0"/"1"`，Parallel：`"2.0"/"2.1"`，Condition：`"3.c0"/"3.f0"`，Loop：`"4.i2.1"` |
+| task_index | 字符串，顺序：`"0"/"1"`，Parallel：`"2.0"/"2.1"`，Discussion：`"2.g0.1"`，Condition：`"3.c0"/"3.f0"`，Loop：`"4.i2.1"` |
 | State 模式 | `pipeline(state=State())` 启用共享状态；v1 callable `fn(results)` 自动兼容 |
 | output_key | 所有 Task 类型支持 `output_key="field"`，执行后自动 `state._set_output(key, output)` |
 | Condition/Loop | 不能嵌入 Parallel 内部（`InvalidPipelineError`），可包含任意其他 PipelineStep |
+| Discussion 定位 | PipelineStep，Agent 直接参与（不降级为 Role），框架自动构建含立场数据的提示词 |
+| Discussion vs Dialogue | Dialogue = 文本对话；Discussion = 结构化立场讨论（position_schema 必填） |
+| Discussion 收敛 | `convergence(position_history)` 每轮末检查；`until(ctx)` 每次发言后检查 |
+| Discussion JSON 降级 | LLM 输出解析失败时：原文作为 response，保持上一轮立场，log warning，不中断讨论 |
+| Discussion 不嵌入 Parallel | `InvalidPipelineError`，可嵌入 Condition/Loop |
+| Agent.task() | 便捷方法，返回 LLMTask（已配置 system_prompt + runner） |
 | Session 策略 | pipeline 内 LLMTask 共享 session；重试/续跑时生成新 session，注入前序输出兜底 |
 | output_schema | `type[BaseModel]`（LLMTask/PollingTask）或 `type`（FunctionTask isinstance 校验） |
 | TaskConfig 优先级 | `task.config > harness.default_config > TaskConfig()` |
@@ -245,8 +294,8 @@ pytest tests/ --cov=harness --cov-report=term-missing
 ```
 
 测试分布：
-- `tests/unit/`：exceptions, executor, harness, memory, parallel, polling, stream_parser, task, state, compat, state_executor, task_index, condition, loop, tasks_split, agent, triggers, event_bus, service_runner
-- `tests/integration/`：pipeline, storage, state_pipeline, agent_pipeline, service
+- `tests/unit/`：exceptions, executor, harness, memory, parallel, polling, stream_parser, task, state, compat, state_executor, task_index, condition, loop, tasks_split, agent, triggers, event_bus, service_runner, discussion
+- `tests/integration/`：pipeline, storage, state_pipeline, agent_pipeline, service, discussion_pipeline
 
 ## 示例
 

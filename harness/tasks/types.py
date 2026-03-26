@@ -7,6 +7,7 @@ from typing import Any
 
 from harness.tasks.condition import Condition
 from harness.tasks.dialogue import Dialogue
+from harness.tasks.discussion import Discussion
 from harness.tasks.function import FunctionTask
 from harness.tasks.llm import LLMTask
 from harness.tasks.loop import Loop
@@ -16,7 +17,7 @@ from harness.tasks.shell import ShellTask
 
 PipelineStep = (
     LLMTask | FunctionTask | ShellTask | PollingTask | Parallel | Dialogue
-    | Condition | Loop
+    | Discussion | Condition | Loop
 )
 
 

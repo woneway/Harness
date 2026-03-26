@@ -7,6 +7,12 @@ from harness.tasks.base import BaseTask, DialogueProgressEvent
 from harness.tasks.condition import Condition
 from harness.tasks.config import TaskConfig
 from harness.tasks.dialogue import Dialogue, DialogueOutput, DialogueTurn, Role
+from harness.tasks.discussion import (
+    Discussion,
+    DiscussionOutput,
+    DiscussionProgressEvent,
+    DiscussionTurn,
+)
 from harness.tasks.function import FunctionTask
 from harness.tasks.llm import LLMTask
 from harness.tasks.loop import Loop
@@ -40,6 +46,11 @@ __all__ = [
     "DialogueOutput",
     "DialogueTurn",
     "Role",
+    # discussion
+    "Discussion",
+    "DiscussionOutput",
+    "DiscussionTurn",
+    "DiscussionProgressEvent",
     # types
     "PipelineStep",
     "Task",

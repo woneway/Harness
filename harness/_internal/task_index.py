@@ -5,6 +5,7 @@ DB 存储格式（向后兼容）：
     parallel:     "2.0"
     dlg_round:    "2.r0.1"
     dlg_turn:     "2.t3"
+    disc_round:   "2.g0.1"
     cond_true:    "3.c0"
     cond_false:   "3.f0"
     loop_iter:    "4.i2.1"
@@ -27,17 +28,19 @@ class TaskIndex:
                   "par"        — Parallel 子任务
                   "dlg_round"  — Dialogue 轮次模式子任务
                   "dlg_turn"   — Dialogue 回合模式子任务
+                  "disc_round" — Discussion 轮次子任务
                   "cond_true"  — Condition if_true 子步骤
                   "cond_false" — Condition if_false 子步骤
                   "loop_iter"  — Loop 迭代子步骤
         sub:    子索引（par: child_index; dlg_round: role_idx; dlg_turn: turn_num;
-                cond_true/cond_false: child_index; loop_iter: child_index）。
-        round_: Dialogue 轮次模式专用，round number（kind=="dlg_round" 时非 None）。
+                disc_round: agent_idx; cond_true/cond_false: child_index;
+                loop_iter: child_index）。
+        round_: Dialogue/Discussion 轮次模式专用，round number。
         iter_:  Loop 专用，迭代号（kind=="loop_iter" 时非 None）。
     """
 
     outer: int
-    kind: Literal["seq", "par", "dlg_round", "dlg_turn",
+    kind: Literal["seq", "par", "dlg_round", "dlg_turn", "disc_round",
                    "cond_true", "cond_false", "loop_iter"] = "seq"
     sub: int | None = None
     round_: int | None = None
@@ -70,6 +73,10 @@ class TaskIndex:
         return TaskIndex(outer=outer, kind="cond_false", sub=child)
 
     @staticmethod
+    def disc_round(outer: int, round_: int, agent_idx: int) -> "TaskIndex":
+        return TaskIndex(outer=outer, kind="disc_round", sub=agent_idx, round_=round_)
+
+    @staticmethod
     def loop_iter(outer: int, iteration: int, child: int) -> "TaskIndex":
         return TaskIndex(outer=outer, kind="loop_iter", sub=child, iter_=iteration)
 
@@ -84,6 +91,8 @@ class TaskIndex:
             return f"{self.outer}.t{self.sub}"
         if self.kind == "dlg_round":
             return f"{self.outer}.r{self.round_}.{self.sub}"
+        if self.kind == "disc_round":
+            return f"{self.outer}.g{self.round_}.{self.sub}"
         if self.kind == "cond_true":
             return f"{self.outer}.c{self.sub}"
         if self.kind == "cond_false":
@@ -112,6 +121,12 @@ class TaskIndex:
             inner = rest[1:]
             round_str, role_str = inner.split(".", 1)
             return cls(outer=outer, kind="dlg_round", sub=int(role_str), round_=int(round_str))
+
+        if rest.startswith("g"):
+            # disc_round: "g{round}.{agent_idx}"
+            inner = rest[1:]
+            round_str, agent_str = inner.split(".", 1)
+            return cls(outer=outer, kind="disc_round", sub=int(agent_str), round_=int(round_str))
 
         if rest.startswith("t"):
             # dlg_turn: "t{turn_num}"

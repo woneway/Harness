@@ -20,7 +20,7 @@ class DialogueProgressEvent:
                        event="start" 时为 None
     """
 
-    event: Literal["start", "complete", "error"]
+    event: Literal["start", "complete", "error", "streaming"]
     round_or_turn: int
     role_name: str
     content: str | None = None

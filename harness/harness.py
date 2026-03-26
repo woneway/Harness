@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 from harness._internal.condition import execute_condition
 from harness._internal.deserialize import deserialize_output
+from harness._internal.discussion import execute_discussion
 from harness._internal.exceptions import InvalidPipelineError, ResumeSchemaError, TaskFailedError
 from harness._internal.task_index import TaskIndex
 from harness._internal.executor import (
@@ -33,6 +34,7 @@ from harness.storage.sql import SQLStorage
 from harness.tasks import (
     Condition,
     Dialogue,
+    Discussion,
     FunctionTask,
     LLMTask,
     Loop,
@@ -175,7 +177,7 @@ class Harness:
         Args:
             step: LLMTask 的 prompt（str 或 Callable），或直接传入 PipelineStep（如 Dialogue）。
         """
-        if isinstance(step, (LLMTask, Dialogue, FunctionTask, ShellTask, PollingTask, Parallel)):
+        if isinstance(step, (LLMTask, Dialogue, Discussion, FunctionTask, ShellTask, PollingTask, Parallel)):
             if output_schema is not None or config is not None:
                 import warnings
                 warnings.warn(
@@ -227,6 +229,11 @@ class Harness:
                     if isinstance(subtask, (Condition, Loop)):
                         raise InvalidPipelineError(
                             f"Condition/Loop inside Parallel is not supported in v2.0. "
+                            f"Found at index {i}."
+                        )
+                    if isinstance(subtask, Discussion):
+                        raise InvalidPipelineError(
+                            f"Discussion inside Parallel is not supported. "
                             f"Found at index {i}."
                         )
 
@@ -477,6 +484,18 @@ class Harness:
                         storage=self._storage,
                         state=state,
                     )
+                elif isinstance(task, Discussion):
+                    r = await execute_discussion(
+                        discussion=task,
+                        outer_index=outer_index,
+                        pipeline_results=results,
+                        run_id=run_id,
+                        harness_system_prompt=self._system_prompt,
+                        harness_runner=self._runner,
+                        harness_config=self._default_config,
+                        storage=self._storage,
+                        state=state,
+                    )
                 elif isinstance(task, Condition):
                     # Condition 递归执行子步骤
                     async def _exec_step_for_cond(step: PipelineStep, ti: str, st: State) -> Result:
@@ -682,6 +701,19 @@ class Harness:
             parsed = TaskIndex.parse(task_index)
             r = await execute_dialogue(
                 dialogue=task,
+                outer_index=parsed.outer,
+                pipeline_results=results,
+                run_id=run_id,
+                harness_system_prompt=self._system_prompt,
+                harness_runner=self._runner,
+                harness_config=self._default_config,
+                storage=self._storage,
+                state=state,
+            )
+        elif isinstance(task, Discussion):
+            parsed = TaskIndex.parse(task_index)
+            r = await execute_discussion(
+                discussion=task,
                 outer_index=parsed.outer,
                 pipeline_results=results,
                 run_id=run_id,

@@ -117,6 +117,24 @@ class Agent:
         )
         return result.text
 
+    def task(
+        self,
+        prompt: str | Callable,
+        *,
+        output_key: str | None = None,
+        output_schema: "type[BaseModel] | None" = None,
+    ) -> "LLMTask":
+        """便捷方法：创建已配置 system_prompt 和 runner 的 LLMTask。"""
+        from harness.tasks.llm import LLMTask
+
+        return LLMTask(
+            prompt=prompt,
+            system_prompt=self.build_system_prompt(),
+            runner=self.runner,
+            output_schema=output_schema,
+            output_key=output_key,
+        )
+
     def as_role(self, prompt: Callable[["DialogueContext"], str]) -> "Role":
         """降级为 Dialogue Role。
 

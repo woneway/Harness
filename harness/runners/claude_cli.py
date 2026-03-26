@@ -179,8 +179,12 @@ class ClaudeCliRunner(AbstractRunner):
             stderr_text = "".join(stderr_chunks)
             logger.warning("claude exited %d, stderr: %s", proc.returncode, stderr_text[:1000])
 
+        # 优先用 result 事件的 text；为空时回退到最后一个 assistant 消息
+        # （Claude 使用工具后 result 可能为空，但 assistant 消息有完整文本）
+        effective_text = parser.final_text or parser._last_assistant_text or ""
+
         return RunnerResult(
-            text=parser.final_text or "",
+            text=effective_text,
             tokens_used=parser.tokens_used,
             session_id=parser.session_id or session_id,
         )

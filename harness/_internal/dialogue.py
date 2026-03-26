@@ -105,6 +105,26 @@ async def _execute_turn(
         _cb = dialogue.role_stream_callback
         role_stream_cb = lambda chunk: _cb(role_name, chunk)  # noqa: E731
 
+    # 自动流式进度：当 progress_callback 设置但无 role_stream_callback 时，
+    # 将 runner 的流式文本转发为 "streaming" 进度事件，让用户看到执行过程。
+    effective_stream_cb = role_stream_cb
+    if effective_stream_cb is None and dialogue.progress_callback is not None:
+        _pcb = dialogue.progress_callback
+        _rname = role_name
+        _rot = round_or_turn
+
+        def _auto_stream_cb(chunk: str) -> None:
+            _pcb(
+                DialogueProgressEvent(
+                    event="streaming",
+                    round_or_turn=_rot,
+                    role_name=_rname,
+                    content=chunk,
+                )
+            )
+
+        effective_stream_cb = _auto_stream_cb
+
     while attempt <= config.max_retries:
         # 进度回调：每次（含重试）发言开始
         if dialogue.progress_callback:
@@ -118,7 +138,7 @@ async def _execute_turn(
                     prompt_text,
                     system_prompt=merged_system,
                     session_id=role_sessions[role_name],
-                    stream_callback=role_stream_cb,
+                    stream_callback=effective_stream_cb,
                 ),
                 timeout=config.timeout,
             )
