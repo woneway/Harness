@@ -20,16 +20,25 @@
     from harness.runners.claude_cli import PermissionMode
 """
 
+from harness.agent import Agent
 from harness.harness import Harness
 from harness.memory import Memory
 from harness.runners.anthropic import AnthropicRunner
+from harness.state import State
 from harness.runners.base import AbstractRunner, RunnerResult
 from harness.runners.openai import OpenAIRunner
-from harness.task import (
+from harness.triggers import CronTrigger, EventTrigger, TriggerContext
+from harness.tasks import (
+    Condition,
     Dialogue,
     DialogueProgressEvent,
+    Discussion,
+    DiscussionOutput,
+    DiscussionProgressEvent,
+    DiscussionTurn,
     FunctionTask,
     LLMTask,
+    Loop,
     Parallel,
     PipelineResult,
     PollingTask,
@@ -43,6 +52,13 @@ from harness.task import (
 
 __all__ = [
     "Harness",
+    "Agent",
+    "State",
+    "CronTrigger",
+    "EventTrigger",
+    "TriggerContext",
+    "Condition",
+    "Loop",
     "LLMTask",
     "FunctionTask",
     "ShellTask",
@@ -50,6 +66,10 @@ __all__ = [
     "Parallel",
     "Dialogue",
     "DialogueProgressEvent",
+    "Discussion",
+    "DiscussionOutput",
+    "DiscussionTurn",
+    "DiscussionProgressEvent",
     "Role",
     "Task",
     "Result",

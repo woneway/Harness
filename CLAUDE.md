@@ -4,8 +4,34 @@
 
 ## 项目状态
 
-**阶段：v1 已实现**（275 tests pass，2026-03-23）
-设计文档：`design/v1-design.md`
+**阶段：v2.2 已实现**（523 tests pass，2026-03-26）
+设计文档：`design/v1-design.md`（v1）、`design/v2-architecture.md`（v2 蓝图）、`design/v2-agent-service-plan.md`（v2.1 方案）
+
+v2.0 新增：
+- `State` 共享状态（替代 `results[N]`）
+- `output_key` 自动写入 state
+- `Condition` 条件分支 / `Loop` 循环
+- `tasks/` 目录拆分（v1 import 路径仍可用）
+- v1 callable 签名 `fn(results)` 自动兼容
+
+v2.1 新增：
+- `Agent` class-based 持久化角色（对齐 CrewAI/AutoGen/ADK）
+- `Agent.run()` 独立执行 / `Agent.as_role()` 降级为 Dialogue Role
+- Agent 结构化角色定义：`description/goal/backstory/constraints` + `build_system_prompt()`
+- `CronTrigger` / `EventTrigger` 触发器
+- `h.service(name, triggers, handler)` 长驻服务模式
+- `h.emit(event, data)` 事件发射
+- EventBus（pyee 可选依赖）
+
+v2.2 新增：
+- `Discussion` 多 Agent 结构化讨论（立场演变 + 共识检测）
+- Discussion 两阶段执行：Phase 1 自由文本分析 → Phase 2 轻量立场提取
+- `extraction_runner`：Phase 2 可用更便宜的模型
+- `DiscussionTurn` / `DiscussionOutput` / `DiscussionProgressEvent` 数据类
+- `position_schema` 必填：定义每个 Agent 的结构化立场
+- 收敛工具函数：`all_agree_on` / `positions_stable` / `majority_agree_on`
+- `Agent.task()` 便捷方法：创建已配置 system_prompt 和 runner 的 LLMTask
+- TaskIndex `disc_round` kind（格式 `"N.gR.A"`）
 
 ## 背景
 
@@ -22,9 +48,17 @@ Claude CLI 优先的通用 AI Workflow 编排框架，独立开源项目。
 ```python
 from harness import (
     Harness,
+    Agent,                  # v2.1: class-based 持久化角色
+    State,                  # v2: 共享状态基类
+    CronTrigger, EventTrigger, TriggerContext,  # v2.1: 触发器
+    Condition, Loop,        # v2: 流程控制
     LLMTask, FunctionTask, ShellTask, PollingTask, Parallel,
-    Dialogue, Role,         # 多角色辩论循环
+    Dialogue, Role,         # 多角色对话循环
     DialogueProgressEvent,  # Dialogue.progress_callback 接收的结构化事件
+    Discussion,             # v2.2: 多 Agent 结构化讨论
+    DiscussionOutput,       # Discussion 结果（含立场演变）
+    DiscussionTurn,         # 单次发言记录（含结构化立场）
+    DiscussionProgressEvent,# Discussion.progress_callback 事件
     Task,                   # LLMTask 的已废弃别名（v2 移除）
     Result, PipelineResult,
     TaskConfig, Memory,
@@ -34,6 +68,7 @@ from harness import (
     OpenAIRunner,                   # OpenAI-compatible API（MiniMax、DeepSeek 等）
     AnthropicRunner,                # Anthropic Messages API（非 CLI）
 )
+from harness.tasks.discussion import all_agree_on, positions_stable, majority_agree_on  # 收敛工具
 from harness.runners.claude_cli import PermissionMode  # 不在顶层导出
 
 h = Harness(project_path="/path/to/project")
@@ -41,7 +76,93 @@ h = Harness(project_path="/path/to/project")
 # 单次 LLM 调用
 result = await h.run("分析并修复代码质量问题")
 
-# 多步混合流水线
+# v2.1: Agent 独立使用（方式一：直接 system_prompt）
+analyst = Agent(name="analyst", system_prompt="技术分析师", runner=my_runner)
+text = await analyst.run("分析今日走势")
+
+# v2.1: Agent 结构化定义（方式二：description/goal/backstory/constraints）
+analyst = Agent(
+    name="龙头猎手",
+    description="辨识龙头的短线选手。",
+    goal="抓住每日龙头股",
+    backstory="从涨停板战法起家，擅长辨识市场主线。",
+    constraints=["只做龙头", "不碰垃圾股"],
+    runner=my_runner,
+)
+text = await analyst.run("分析今日走势")  # build_system_prompt() 自动组装
+
+# v2.1: Agent 在 Dialogue 中使用
+trader = Agent(name="trader", system_prompt="短线交易员", runner=my_runner)
+dialogue = Dialogue(
+    roles=[
+        analyst.as_role(lambda ctx: f"分析: {ctx.state.market}"),
+        trader.as_role(lambda ctx: f"回应: {ctx.last_from('analyst')}"),
+    ],
+    max_rounds=3,
+)
+
+# v2.2: Discussion 结构化讨论（立场演变 + 共识检测）
+from pydantic import BaseModel
+
+class TradingPosition(BaseModel):
+    top_pick: str
+    direction: str
+    confidence: float
+
+analyst = Agent(name="技术分析师", description="看K线", runner=my_runner)
+trader = Agent(name="短线交易员", description="盘中选股", runner=my_runner)
+
+pr = await h.pipeline([
+    Discussion(
+        agents=[analyst, trader],
+        position_schema=TradingPosition,
+        topic="下午盘选股",
+        background=lambda state: f"行情：{state.market}",
+        max_rounds=4,
+        convergence=all_agree_on("top_pick"),
+        output_key="discussion",
+    ),
+])
+output = pr.results[0].output  # DiscussionOutput
+# output.converged, output.final_positions, output.position_history
+
+# v2.2: Agent.task() 便捷方法
+task = analyst.task("分析走势", output_key="analysis")  # 返回 LLMTask
+
+# v2: State 模式 pipeline（推荐）
+class MyState(State):
+    analysis: str = ""
+    report: str = ""
+
+pr = await h.pipeline([
+    FunctionTask(fn=lambda state: state._set_output("data", fetch()), output_key="data"),
+    LLMTask("分析数据", output_key="analysis"),
+    Condition(
+        check=lambda state: len(state.analysis) > 100,
+        if_true=[LLMTask("生成详细报告", output_key="report")],
+        if_false=[FunctionTask(fn=lambda state: "简短报告", output_key="report")],
+    ),
+    Loop(
+        body=[LLMTask("优化报告", output_key="report")],
+        until=lambda state: quality_ok(state.report),
+        max_iterations=3,
+    ),
+], state=MyState())
+
+# v2.1: Service 长驻模式
+async def on_trigger(ctx: TriggerContext):
+    return [LLMTask("处理事件", output_key="result")]
+
+h.service("my-service", triggers=[
+    CronTrigger("15 15 * * 1-5"),
+    EventTrigger("alert", filter=lambda d: d["level"] > 3),
+], handler=on_trigger)
+await h.start()
+
+# 外部事件推送
+await h.emit("alert", {"level": 5, "msg": "异常检测"})
+
+# v1: results 模式 pipeline（向后兼容）
 results = await h.pipeline([
     FunctionTask(fn=collect_data),
     LLMTask("分析数据，给出优化建议"),
@@ -61,9 +182,28 @@ await h.start()
 ```
 harness/
   __init__.py          # 公开 API 导出
-  harness.py           # Harness 主类（用户入口）
-  task.py              # 所有 Task 类型 + TaskConfig + Result + PipelineResult
+  harness.py           # Harness 主类（pipeline/service/start/stop）
+  agent.py             # Agent class-based 角色 + 结构化定义（v2.1）
+  state.py             # State 共享状态基类（v2 新增）
+  triggers.py          # CronTrigger, EventTrigger, TriggerContext（v2.1 新增）
+  task.py              # re-export shim → harness.tasks（v1 兼容）
   memory.py            # Memory（历史运行注入 + memory.md）
+
+  tasks/               # v2 新增：拆分的任务模块
+    __init__.py        # 统一导出
+    config.py          # TaskConfig
+    result.py          # Result, PipelineResult, result_by_type
+    base.py            # BaseTask, DialogueProgressEvent
+    llm.py             # LLMTask（含 output_key）
+    function.py        # FunctionTask（含 output_key）
+    shell.py           # ShellTask（含 output_key）
+    polling.py         # PollingTask（含 output_key）
+    parallel.py        # Parallel
+    dialogue.py        # Dialogue, Role, DialogueTurn, DialogueOutput
+    discussion.py      # Discussion, DiscussionOutput, DiscussionTurn, 收敛工具（v2.2 新增）
+    condition.py       # Condition（v2 新增）
+    loop.py            # Loop（v2 新增）
+    types.py           # PipelineStep union 类型别名
 
   runners/
     base.py            # AbstractRunner + RunnerResult
@@ -87,9 +227,16 @@ harness/
 
   _internal/
     executor.py        # Task 派发 + 重试 + session 管理 + prompt 注入
+    compat.py          # v1/v2 callable 双模式检测（v2 新增）
+    condition.py       # Condition 执行逻辑（v2 新增）
+    loop.py            # Loop 执行逻辑（v2 新增）
+    task_index.py      # TaskIndex 结构化索引（含 cond/loop 格式）
     parallel.py        # Parallel 并发执行（asyncio.gather + error_policy）
     polling.py         # PollingTask 轮询循环
     dialogue.py        # Dialogue 多角色执行 + DialogueContext
+    discussion.py      # Discussion 执行引擎 + DiscussionContext（v2.2 新增）
+    event_bus.py       # EventBus（pyee 封装，v2.1 新增）
+    service.py         # ServiceRunner 服务执行核心（v2.1 新增）
     stream_parser.py   # Claude stream-json 逐行解析
     session.py         # SessionManager（pipeline 内 session 共享）
     exceptions.py      # TaskFailedError / ClaudeNotFoundError / ...
@@ -105,7 +252,18 @@ harness/
 | 默认存储 | SQLite + WAL，路径 `{project_path}/.harness/harness.db` |
 | 默认权限 | `PermissionMode.BYPASS`（无人值守） |
 | `run()` | `pipeline([single_LLMTask])` 语法糖 |
-| task_index | 字符串，顺序：`"0"/"1"`，Parallel 内：`"2.0"/"2.1"` |
+| task_index | 字符串，顺序：`"0"/"1"`，Parallel：`"2.0"/"2.1"`，Discussion：`"2.g0.1"`，Condition：`"3.c0"/"3.f0"`，Loop：`"4.i2.1"` |
+| State 模式 | `pipeline(state=State())` 启用共享状态；v1 callable `fn(results)` 自动兼容 |
+| output_key | 所有 Task 类型支持 `output_key="field"`，执行后自动 `state._set_output(key, output)` |
+| Condition/Loop | 不能嵌入 Parallel 内部（`InvalidPipelineError`），可包含任意其他 PipelineStep |
+| Discussion 定位 | PipelineStep，Agent 直接参与（不降级为 Role），框架自动构建含立场数据的提示词 |
+| Discussion vs Dialogue | Dialogue = 文本对话；Discussion = 结构化立场讨论（position_schema 必填） |
+| Discussion 收敛 | `convergence(position_history)` 每轮末检查；`until(ctx)` 每次发言后检查 |
+| Discussion JSON 降级 | LLM 输出解析失败时：原文作为 response，保持上一轮立场，log warning，不中断讨论 |
+| Discussion 两阶段 | Phase 1 自由文本（agent session），Phase 2 提取立场（fresh session + output_schema）|
+| Discussion extraction_runner | 可选，Phase 2 使用独立 runner（可用更便宜的模型），默认复用 agent runner |
+| Discussion 不嵌入 Parallel | `InvalidPipelineError`，可嵌入 Condition/Loop |
+| Agent.task() | 便捷方法，返回 LLMTask（已配置 system_prompt + runner） |
 | Session 策略 | pipeline 内 LLMTask 共享 session；重试/续跑时生成新 session，注入前序输出兜底 |
 | output_schema | `type[BaseModel]`（LLMTask/PollingTask）或 `type`（FunctionTask isinstance 校验） |
 | TaskConfig 优先级 | `task.config > harness.default_config > TaskConfig()` |
@@ -115,6 +273,11 @@ harness/
 | Parallel 续跑 | 原子单元：块内任意子 task 未成功则整体重跑 |
 | APScheduler v4 | 延迟注册模式：`add_job()` 缓存，`start()` 批量 `await add_schedule()` |
 | ClaudeCliRunner 超时 | `executor.py` 用 `asyncio.wait_for` 触发取消，runner 内 `except CancelledError` → SIGTERM → 5s → SIGKILL |
+| Agent 定位 | 构建块（不是 PipelineStep），通过 `as_role()` 降级到 Dialogue，通过 FunctionTask 进入 pipeline |
+| Agent system_prompt | 两种互斥方式：①直接传 `system_prompt`（优先级最高）②结构化 `description/goal/backstory/constraints`，`build_system_prompt()` 组装 |
+| Service 模式 | `h.service(name, triggers, handler)` 注册；handler 返回 pipeline steps，复用 `h.pipeline()` 执行 |
+| EventBus | pyee 可选依赖（`harness-ai[service]`），仅在有 EventTrigger 时懒初始化 |
+| Service 错误隔离 | 单次触发执行失败（handler 异常/pipeline 异常）不中断服务 |
 
 ## 已知问题（待修复）
 
@@ -134,8 +297,8 @@ pytest tests/ --cov=harness --cov-report=term-missing
 ```
 
 测试分布：
-- `tests/unit/`：exceptions, executor, harness, memory, parallel, polling, stream_parser, task
-- `tests/integration/`：pipeline（端到端，不需要 Claude CLI）、storage（SQLite 读写）
+- `tests/unit/`：exceptions, executor, harness, memory, parallel, polling, stream_parser, task, state, compat, state_executor, task_index, condition, loop, tasks_split, agent, triggers, event_bus, service_runner, discussion
+- `tests/integration/`：pipeline, storage, state_pipeline, agent_pipeline, service, discussion_pipeline
 
 ## 示例
 
@@ -144,4 +307,5 @@ uv run python examples/code_stats/main.py               # 统计代码量（Func
 uv run python examples/analyze_harness/main.py          # 分析 → 优化 → 复盘（三阶段 pipeline）
 uv run python examples/research_report/main.py Clawith  # 联网调研报告（多 LLMTask + FunctionTask）
 uv run python examples/video_pipeline/main.py           # LLMTask + Parallel[PollingTask×2] + FunctionTask
+uv run python examples/stock_traders/main.py            # 多游资盘中讨论选股（Agent 结构化角色 + Dialogue）
 ```
