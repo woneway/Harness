@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
 
     from harness.agent import Agent
+    from harness.runners.base import AbstractRunner
     from harness.state import State
 
 
@@ -98,6 +99,9 @@ class Discussion(BaseTask):
 
     # 自定义终止（与 convergence 互补）
     until: Callable[["DiscussionContext"], bool] | None = None
+
+    # Phase 2 立场提取可用更便宜的模型
+    extraction_runner: "AbstractRunner | None" = None
 
     output_key: str | None = None
     progress_callback: Callable[[DiscussionProgressEvent], None] | None = None

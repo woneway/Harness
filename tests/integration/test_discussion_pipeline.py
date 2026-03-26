@@ -28,21 +28,34 @@ class SimplePosition(BaseModel):
     choice: str
 
 
-def _json(response: str, position: dict) -> str:
-    return json.dumps({"response": response, "position": position})
+def _pos_json(position: dict) -> str:
+    return json.dumps(position)
 
 
 class _DiscussionRunner(AbstractRunner):
-    """Mock runner returning cycling JSON responses."""
+    """两阶段 mock runner：根据 output_schema_json 区分 Phase 1/2。"""
 
-    def __init__(self, responses: list[str]) -> None:
+    def __init__(
+        self,
+        responses: list[str],
+        extraction_responses: list[str] | None = None,
+    ) -> None:
         self._responses = responses
-        self._idx = 0
+        self._extraction_responses = extraction_responses or []
+        self._phase1_idx = 0
+        self._phase2_idx = 0
 
     async def execute(self, prompt, *, system_prompt, session_id, **kwargs) -> RunnerResult:
-        text = self._responses[self._idx % len(self._responses)]
-        self._idx += 1
-        return RunnerResult(text=text, tokens_used=10, session_id=f"s{self._idx}")
+        if kwargs.get("output_schema_json") is not None:
+            # Phase 2: extraction
+            text = self._extraction_responses[self._phase2_idx % len(self._extraction_responses)]
+            self._phase2_idx += 1
+            return RunnerResult(text=text, tokens_used=5, session_id=None)
+        else:
+            # Phase 1: free text
+            text = self._responses[self._phase1_idx % len(self._responses)]
+            self._phase1_idx += 1
+            return RunnerResult(text=text, tokens_used=10, session_id=f"s{self._phase1_idx}")
 
 
 class _SimpleRunner(AbstractRunner):
@@ -62,10 +75,13 @@ class TestDiscussionInPipeline:
     @pytest.mark.asyncio
     async def test_function_discussion_llm_pipeline(self) -> None:
         """FunctionTask → Discussion → LLMTask pipeline。"""
-        disc_runner = _DiscussionRunner([
-            _json("a picks X", {"choice": "X"}),
-            _json("b picks X", {"choice": "X"}),
-        ])
+        disc_runner = _DiscussionRunner(
+            responses=["a picks X", "b picks X"],
+            extraction_responses=[
+                _pos_json({"choice": "X"}),
+                _pos_json({"choice": "X"}),
+            ],
+        )
         llm_runner = _SimpleRunner("final plan")
 
         a1 = Agent(name="a", system_prompt="sp", runner=disc_runner)
@@ -102,9 +118,10 @@ class TestDiscussionInPipeline:
     @pytest.mark.asyncio
     async def test_discussion_state_output_key(self) -> None:
         """Discussion + State + output_key 写入。"""
-        runner = _DiscussionRunner([
-            _json("ok", {"choice": "AAPL"}),
-        ])
+        runner = _DiscussionRunner(
+            responses=["ok"],
+            extraction_responses=[_pos_json({"choice": "AAPL"})],
+        )
         a1 = Agent(name="a", system_prompt="sp", runner=runner)
 
         class MyState(State):
@@ -131,12 +148,15 @@ class TestDiscussionInPipeline:
     @pytest.mark.asyncio
     async def test_discussion_convergence_in_pipeline(self) -> None:
         """Discussion with convergence stops early in pipeline。"""
-        runner = _DiscussionRunner([
-            _json("r0 a", {"choice": "X"}),
-            _json("r0 b", {"choice": "Y"}),
-            _json("r1 a→Y", {"choice": "Y"}),
-            _json("r1 b", {"choice": "Y"}),
-        ])
+        runner = _DiscussionRunner(
+            responses=["r0 a", "r0 b", "r1 a→Y", "r1 b"],
+            extraction_responses=[
+                _pos_json({"choice": "X"}),
+                _pos_json({"choice": "Y"}),
+                _pos_json({"choice": "Y"}),
+                _pos_json({"choice": "Y"}),
+            ],
+        )
         a1 = Agent(name="a", system_prompt="sp", runner=runner)
         a2 = Agent(name="b", system_prompt="sp", runner=runner)
 
@@ -165,7 +185,10 @@ class TestDiscussionInCondition:
     @pytest.mark.asyncio
     async def test_discussion_in_condition_branch(self) -> None:
         """Discussion 嵌入 Condition if_true 分支。"""
-        runner = _DiscussionRunner([_json("ok", {"choice": "A"})])
+        runner = _DiscussionRunner(
+            responses=["ok"],
+            extraction_responses=[_pos_json({"choice": "A"})],
+        )
         a1 = Agent(name="a", system_prompt="sp", runner=runner)
 
         class MyState(State):
@@ -222,7 +245,10 @@ class TestDiscussionNotInParallel:
     @pytest.mark.asyncio
     async def test_discussion_in_parallel_raises(self) -> None:
         """Discussion 嵌入 Parallel 时抛 InvalidPipelineError。"""
-        runner = _DiscussionRunner([_json("ok", {"choice": "A"})])
+        runner = _DiscussionRunner(
+            responses=["ok"],
+            extraction_responses=[_pos_json({"choice": "A"})],
+        )
         a1 = Agent(name="a", system_prompt="sp", runner=runner)
 
         h = Harness(project_path="/tmp/test", runner=runner)
@@ -248,11 +274,14 @@ class TestPositionHistoryAccumulation:
     @pytest.mark.asyncio
     async def test_position_history_multi_round(self) -> None:
         """position_history 跨多轮正确累积。"""
-        runner = _DiscussionRunner([
-            _json("r0", {"choice": "X"}),
-            _json("r1", {"choice": "Y"}),
-            _json("r2", {"choice": "Z"}),
-        ])
+        runner = _DiscussionRunner(
+            responses=["r0", "r1", "r2"],
+            extraction_responses=[
+                _pos_json({"choice": "X"}),
+                _pos_json({"choice": "Y"}),
+                _pos_json({"choice": "Z"}),
+            ],
+        )
         a1 = Agent(name="a", system_prompt="sp", runner=runner)
 
         h = Harness(project_path="/tmp/test", runner=runner)
@@ -280,12 +309,15 @@ class TestFinalPositions:
     @pytest.mark.asyncio
     async def test_final_positions_reflect_last_round(self) -> None:
         """final_positions 反映最后一轮的立场。"""
-        runner = _DiscussionRunner([
-            _json("r0a", {"choice": "X"}),
-            _json("r0b", {"choice": "Y"}),
-            _json("r1a", {"choice": "Z"}),
-            _json("r1b", {"choice": "Z"}),
-        ])
+        runner = _DiscussionRunner(
+            responses=["r0a", "r0b", "r1a", "r1b"],
+            extraction_responses=[
+                _pos_json({"choice": "X"}),
+                _pos_json({"choice": "Y"}),
+                _pos_json({"choice": "Z"}),
+                _pos_json({"choice": "Z"}),
+            ],
+        )
         a1 = Agent(name="a", system_prompt="sp", runner=runner)
         a2 = Agent(name="b", system_prompt="sp", runner=runner)
 

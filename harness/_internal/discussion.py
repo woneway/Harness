@@ -83,20 +83,6 @@ class DiscussionContext:
         return False
 
 
-# ── Schema 生成 ─────────────────────────────────────────────────────────────
-
-
-def _make_turn_schema(position_schema: type["BaseModel"]) -> type["BaseModel"]:
-    """动态生成 { response: str, position: PositionSchema }。"""
-    from pydantic import create_model
-
-    return create_model(
-        f"DiscussionTurn_{position_schema.__name__}",
-        response=(str, ...),
-        position=(position_schema, ...),
-    )
-
-
 # ── 默认提示词模板 ──────────────────────────────────────────────────────────
 
 
@@ -172,23 +158,59 @@ def _resolve_prompt(
 
 def _merge_system_prompt(
     agent: "Agent",
-    combined_schema: type["BaseModel"],
     harness_sp: str,
 ) -> str:
-    """合并 system_prompt：agent.build_system_prompt() + harness_sp + JSON 格式说明。"""
+    """合并 system_prompt：agent.build_system_prompt() + harness_sp。"""
     parts = []
     agent_sp = agent.build_system_prompt()
     if agent_sp:
         parts.append(agent_sp)
     if harness_sp:
         parts.append(harness_sp)
-
-    schema_json = json.dumps(combined_schema.model_json_schema(), ensure_ascii=False, indent=2)
-    parts.append(
-        f"请用 JSON 格式回复，schema 如下：\n```json\n{schema_json}\n```\n"
-        "response 字段填写你的分析和理由，position 字段填写你的立场。"
-    )
     return "\n\n".join(parts)
+
+
+# ── Phase 2: 立场提取 ──────────────────────────────────────────────────────
+
+
+def _build_extraction_prompt(response_text: str, position_schema: type["BaseModel"]) -> str:
+    """构建 Phase 2 立场提取 prompt。"""
+    schema_json = json.dumps(position_schema.model_json_schema(), ensure_ascii=False, indent=2)
+    return (
+        "请从以下发言中提取结构化立场，严格按 JSON schema 输出。\n\n"
+        f"## 发言原文\n{response_text}\n\n"
+        f"## JSON Schema\n```json\n{schema_json}\n```\n\n"
+        "请只输出一个 JSON 对象，不要包含其他文字。"
+    )
+
+
+def _extract_position(text: str, position_schema: type["BaseModel"]) -> "Any | None":
+    """三级 JSON 提取容错：直接解析 → 代码块 → 正则提取 → None。"""
+    import re
+
+    # Level 1: 直接解析
+    try:
+        return position_schema.model_validate_json(text)
+    except Exception:
+        pass
+
+    # Level 2: 提取 ```json ... ``` 代码块
+    code_block = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
+    if code_block:
+        try:
+            return position_schema.model_validate_json(code_block.group(1).strip())
+        except Exception:
+            pass
+
+    # Level 3: 正则提取第一个 { ... }
+    brace_match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
+    if brace_match:
+        try:
+            return position_schema.model_validate_json(brace_match.group(0))
+        except Exception:
+            pass
+
+    return None
 
 
 # ── 单次发言执行 ────────────────────────────────────────────────────────────
@@ -200,7 +222,6 @@ async def _execute_agent_turn(
     round_num: int,
     discussion: Discussion,
     ctx: DiscussionContext,
-    combined_schema: type["BaseModel"],
     agent_sessions: dict[str, str | None],
     harness_system_prompt: str,
     harness_runner: "AbstractRunner",
@@ -208,9 +229,12 @@ async def _execute_agent_turn(
     run_id: str,
     config: TaskConfig,
 ) -> "tuple[DiscussionTurn, int, Any]":
-    """执行单次 Agent 发言，返回 (DiscussionTurn, tokens, parsed_position)。
+    """两阶段执行单次 Agent 发言，返回 (DiscussionTurn, tokens, parsed_position)。
 
-    JSON 解析失败时降级：原文作为 response，本轮无 position 更新。
+    Phase 1: 自由文本分析（agent session，流式输出，无 JSON 约束）
+    Phase 2: 轻量立场提取（fresh session，output_schema，无流式）
+
+    Phase 2 解析失败时降级：保留上一轮立场（与旧行为一致）。
     """
     # 解析 prompt
     try:
@@ -221,9 +245,8 @@ async def _execute_agent_turn(
             f"Agent '{agent.name}' prompt callable raised: {e}",
         )
 
-    system = _merge_system_prompt(agent, combined_schema, harness_system_prompt)
+    system = _merge_system_prompt(agent, harness_system_prompt)
     runner = agent.runner or harness_runner
-    schema_json = json.dumps(combined_schema.model_json_schema())
 
     last_error = ""
     attempt = 0
@@ -235,8 +258,7 @@ async def _execute_agent_turn(
         _cb = discussion.role_stream_callback
         role_stream_cb = lambda chunk: _cb(agent.name, chunk)  # noqa: E731
 
-    # 自动流式进度：当 progress_callback 设置但无 role_stream_callback 时，
-    # 将 Claude 的流式文本转发为 "streaming" 进度事件，让用户看到执行过程。
+    # 自动流式进度
     effective_stream_cb = role_stream_cb
     if effective_stream_cb is None and discussion.progress_callback is not None:
         _pcb = discussion.progress_callback
@@ -262,12 +284,13 @@ async def _execute_agent_turn(
             )
 
         try:
-            runner_result = await asyncio.wait_for(
+            # ── Phase 1: 自由文本分析 ──
+            phase1_result = await asyncio.wait_for(
                 runner.execute(
                     prompt_text,
                     system_prompt=system,
                     session_id=agent_sessions[agent.name],
-                    output_schema_json=schema_json,
+                    output_schema_json=None,
                     stream_callback=effective_stream_cb,
                 ),
                 timeout=config.timeout,
@@ -279,28 +302,58 @@ async def _execute_agent_turn(
             last_error = str(e)
             logger.warning("Discussion turn %s attempt %d failed: %s", task_index, attempt, e)
         else:
-            if runner_result.session_id:
-                agent_sessions[agent.name] = runner_result.session_id
+            # Phase 1 成功：更新 agent session
+            if phase1_result.session_id:
+                agent_sessions[agent.name] = phase1_result.session_id
 
-            # 尝试解析组合 schema
+            response_text = phase1_result.text
+            total_tokens = phase1_result.tokens_used
+
+            # ── Phase 2: 立场提取 ──
             prev_position = ctx.my_position
+            extraction_prompt = _build_extraction_prompt(
+                response_text, discussion.position_schema,
+            )
+            extraction_runner = discussion.extraction_runner or runner
+            position_schema_json = json.dumps(
+                discussion.position_schema.model_json_schema(),
+            )
+
+            phase2_timeout = min(config.timeout, 60)
             try:
-                parsed = combined_schema.model_validate_json(runner_result.text)
-                response_text = parsed.response
-                position = parsed.position
-                changed = prev_position is None or (
-                    position.model_dump() != prev_position.model_dump()
-                    if hasattr(prev_position, "model_dump")
-                    else position.model_dump() != prev_position
+                phase2_result = await asyncio.wait_for(
+                    extraction_runner.execute(
+                        extraction_prompt,
+                        system_prompt="",
+                        session_id=None,
+                        output_schema_json=position_schema_json,
+                    ),
+                    timeout=phase2_timeout,
                 )
-            except Exception as parse_err:
-                # 降级：原文作为 response，不更新立场
+                total_tokens += phase2_result.tokens_used
+
+                position = _extract_position(phase2_result.text, discussion.position_schema)
+                if position is not None:
+                    changed = prev_position is None or (
+                        position.model_dump() != prev_position.model_dump()
+                        if hasattr(prev_position, "model_dump")
+                        else position.model_dump() != prev_position
+                    )
+                else:
+                    # Phase 2 提取失败降级
+                    logger.warning(
+                        "Discussion turn %s Phase 2 extraction failed, degrading",
+                        task_index,
+                    )
+                    position = prev_position
+                    changed = False
+            except Exception as phase2_err:
+                # Phase 2 整体失败降级
                 logger.warning(
-                    "Discussion turn %s JSON parse failed, degrading: %s",
-                    task_index, parse_err,
+                    "Discussion turn %s Phase 2 failed, degrading: %s",
+                    task_index, phase2_err,
                 )
-                response_text = runner_result.text
-                position = prev_position  # 保持上一轮立场
+                position = prev_position
                 changed = False
 
             turn = DiscussionTurn(
@@ -314,10 +367,10 @@ async def _execute_agent_turn(
             if storage is not None:
                 await storage.save_task_log(
                     run_id, task_index, "discussion",
-                    output=runner_result.text,
+                    output=response_text,
                     output_schema_class=None,
-                    raw_text=runner_result.text,
-                    tokens_used=runner_result.tokens_used,
+                    raw_text=response_text,
+                    tokens_used=total_tokens,
                     duration_seconds=time.monotonic() - turn_start,
                     success=True,
                     error=None,
@@ -333,7 +386,7 @@ async def _execute_agent_turn(
                         content=response_text,
                     )
                 )
-            return turn, runner_result.tokens_used, position
+            return turn, total_tokens, position
 
         attempt += 1
         if attempt <= config.max_retries:
@@ -381,7 +434,6 @@ async def execute_discussion(
     config = discussion.config or harness_config or TaskConfig()
     start_time = time.monotonic()
 
-    combined_schema = _make_turn_schema(discussion.position_schema)
     agent_sessions: dict[str, str | None] = {a.name: None for a in discussion.agents}
     history: list[DiscussionTurn] = []
     position_history: dict[str, list[Any]] = {a.name: [] for a in discussion.agents}
@@ -418,7 +470,7 @@ async def execute_discussion(
 
             turn, turn_tokens, position = await _execute_agent_turn(
                 agent, task_index, round_num,
-                discussion, ctx, combined_schema,
+                discussion, ctx,
                 agent_sessions, harness_system_prompt, harness_runner,
                 storage, run_id, config,
             )

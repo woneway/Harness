@@ -25,6 +25,8 @@ v2.1 新增：
 
 v2.2 新增：
 - `Discussion` 多 Agent 结构化讨论（立场演变 + 共识检测）
+- Discussion 两阶段执行：Phase 1 自由文本分析 → Phase 2 轻量立场提取
+- `extraction_runner`：Phase 2 可用更便宜的模型
 - `DiscussionTurn` / `DiscussionOutput` / `DiscussionProgressEvent` 数据类
 - `position_schema` 必填：定义每个 Agent 的结构化立场
 - 收敛工具函数：`all_agree_on` / `positions_stable` / `majority_agree_on`
@@ -259,6 +261,8 @@ harness/
 | Discussion vs Dialogue | Dialogue = 文本对话；Discussion = 结构化立场讨论（position_schema 必填） |
 | Discussion 收敛 | `convergence(position_history)` 每轮末检查；`until(ctx)` 每次发言后检查 |
 | Discussion JSON 降级 | LLM 输出解析失败时：原文作为 response，保持上一轮立场，log warning，不中断讨论 |
+| Discussion 两阶段 | Phase 1 自由文本（agent session），Phase 2 提取立场（fresh session + output_schema）|
+| Discussion extraction_runner | 可选，Phase 2 使用独立 runner（可用更便宜的模型），默认复用 agent runner |
 | Discussion 不嵌入 Parallel | `InvalidPipelineError`，可嵌入 Condition/Loop |
 | Agent.task() | 便捷方法，返回 LLMTask（已配置 system_prompt + runner） |
 | Session 策略 | pipeline 内 LLMTask 共享 session；重试/续跑时生成新 session，注入前序输出兜底 |

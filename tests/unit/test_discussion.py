@@ -23,8 +23,9 @@ from harness.tasks.discussion import (
 )
 from harness._internal.discussion import (
     DiscussionContext,
+    _build_extraction_prompt,
     _default_prompt_template,
-    _make_turn_schema,
+    _extract_position,
     _merge_system_prompt,
     _resolve_prompt,
     execute_discussion,
@@ -46,12 +47,23 @@ class SimplePosition(BaseModel):
 
 
 class MockRunner(AbstractRunner):
-    """返回预设 JSON 的 mock runner。"""
+    """两阶段 mock runner。
 
-    def __init__(self, responses: list[str] | None = None, default: str = "") -> None:
+    Phase 1（无 output_schema_json）：返回自然文本。
+    Phase 2（有 output_schema_json）：返回 position JSON。
+    """
+
+    def __init__(
+        self,
+        responses: list[str] | None = None,
+        extraction_responses: list[str] | None = None,
+        default: str = "",
+    ) -> None:
         self._responses = list(responses) if responses else []
+        self._extraction_responses = list(extraction_responses) if extraction_responses else []
         self._default = default
-        self._call_count = 0
+        self._phase1_count = 0
+        self._phase2_count = 0
         self.calls: list[dict] = []
 
     async def execute(self, prompt, *, system_prompt, session_id, **kwargs) -> RunnerResult:
@@ -61,16 +73,26 @@ class MockRunner(AbstractRunner):
             "session_id": session_id,
             "kwargs": kwargs,
         })
-        if self._responses:
-            text = self._responses[self._call_count % len(self._responses)]
+        if kwargs.get("output_schema_json") is not None:
+            # Phase 2: 返回 position JSON
+            if self._extraction_responses:
+                text = self._extraction_responses[self._phase2_count % len(self._extraction_responses)]
+            else:
+                text = self._default
+            self._phase2_count += 1
+            return RunnerResult(text=text, tokens_used=5, session_id=None)
         else:
-            text = self._default
-        self._call_count += 1
-        return RunnerResult(text=text, tokens_used=10, session_id=f"sess-{self._call_count}")
+            # Phase 1: 返回自然文本
+            if self._responses:
+                text = self._responses[self._phase1_count % len(self._responses)]
+            else:
+                text = self._default
+            self._phase1_count += 1
+            return RunnerResult(text=text, tokens_used=10, session_id=f"sess-{self._phase1_count}")
 
 
-def _make_json(response: str, position: dict) -> str:
-    return json.dumps({"response": response, "position": position})
+def _pos_json(position: dict) -> str:
+    return json.dumps(position)
 
 
 def _make_agent(name: str, runner: AbstractRunner | None = None) -> Agent:
@@ -159,27 +181,6 @@ class TestDiscussionContext:
         assert ctx.positions == {}
         assert ctx.position_history == {}
         assert ctx.my_position is None
-
-
-# ── _make_turn_schema ──────────────────────────────────────────────────────
-
-
-class TestMakeTurnSchema:
-    def test_creates_valid_schema(self) -> None:
-        schema = _make_turn_schema(SimplePosition)
-        instance = schema(response="test", position=SimplePosition(choice="A"))
-        assert instance.response == "test"
-        assert instance.position.choice == "A"
-
-    def test_json_roundtrip(self) -> None:
-        schema = _make_turn_schema(TradingPosition)
-        data = {"response": "my analysis", "position": {"top_pick": "AAPL", "direction": "buy", "confidence": 0.8}}
-        instance = schema.model_validate(data)
-        assert instance.position.top_pick == "AAPL"
-
-    def test_schema_name_includes_position_name(self) -> None:
-        schema = _make_turn_schema(SimplePosition)
-        assert "SimplePosition" in schema.__name__
 
 
 # ── _default_prompt_template ───────────────────────────────────────────────
@@ -343,6 +344,77 @@ class TestConvergenceUtils:
         assert majority_agree_on("choice", threshold=0.6)(history) is False
 
 
+# ── _build_extraction_prompt ─────────────────────────────────────────────
+
+
+class TestBuildExtractionPrompt:
+    def test_includes_response_text(self) -> None:
+        prompt = _build_extraction_prompt("我看好AAPL", SimplePosition)
+        assert "我看好AAPL" in prompt
+
+    def test_includes_schema(self) -> None:
+        prompt = _build_extraction_prompt("some text", SimplePosition)
+        assert "choice" in prompt
+        assert "JSON" in prompt
+
+    def test_includes_instruction(self) -> None:
+        prompt = _build_extraction_prompt("text", SimplePosition)
+        assert "提取" in prompt
+
+
+# ── _extract_position ────────────────────────────────────────────────────
+
+
+class TestExtractPosition:
+    def test_direct_json(self) -> None:
+        """直接 JSON 解析成功。"""
+        text = '{"choice": "AAPL"}'
+        pos = _extract_position(text, SimplePosition)
+        assert pos is not None
+        assert pos.choice == "AAPL"
+
+    def test_json_code_block(self) -> None:
+        """从 ```json 代码块中提取。"""
+        text = '这是分析\n```json\n{"choice": "TSLA"}\n```\n结束'
+        pos = _extract_position(text, SimplePosition)
+        assert pos is not None
+        assert pos.choice == "TSLA"
+
+    def test_code_block_no_lang(self) -> None:
+        """从无语言标记的代码块中提取。"""
+        text = '分析\n```\n{"choice": "GOOG"}\n```'
+        pos = _extract_position(text, SimplePosition)
+        assert pos is not None
+        assert pos.choice == "GOOG"
+
+    def test_embedded_json(self) -> None:
+        """从嵌入的 JSON 对象中正则提取。"""
+        text = '我的立场是 {"choice": "META"} 就这样'
+        pos = _extract_position(text, SimplePosition)
+        assert pos is not None
+        assert pos.choice == "META"
+
+    def test_returns_none_on_failure(self) -> None:
+        """完全无法解析时返回 None。"""
+        text = "这是纯文本，没有任何 JSON"
+        pos = _extract_position(text, SimplePosition)
+        assert pos is None
+
+    def test_invalid_json_returns_none(self) -> None:
+        """JSON 结构不匹配 schema 时返回 None。"""
+        text = '{"wrong_field": 123}'
+        pos = _extract_position(text, SimplePosition)
+        assert pos is None
+
+    def test_complex_schema(self) -> None:
+        """复杂 schema 的提取。"""
+        text = '{"top_pick": "AAPL", "direction": "buy", "confidence": 0.9}'
+        pos = _extract_position(text, TradingPosition)
+        assert pos is not None
+        assert pos.top_pick == "AAPL"
+        assert pos.confidence == 0.9
+
+
 # ── execute_discussion ─────────────────────────────────────────────────────
 
 
@@ -350,11 +422,13 @@ class TestExecuteDiscussion:
     @pytest.mark.asyncio
     async def test_single_round_two_agents(self) -> None:
         """单轮两个 Agent，产出正确 DiscussionOutput。"""
-        responses = [
-            _make_json("I pick AAPL", {"choice": "AAPL"}),
-            _make_json("I pick TSLA", {"choice": "TSLA"}),
-        ]
-        runner = MockRunner(responses=responses)
+        runner = MockRunner(
+            responses=["I pick AAPL because...", "I pick TSLA because..."],
+            extraction_responses=[
+                _pos_json({"choice": "AAPL"}),
+                _pos_json({"choice": "TSLA"}),
+            ],
+        )
         a1 = _make_agent("analyst", runner)
         a2 = _make_agent("trader", runner)
 
@@ -385,13 +459,15 @@ class TestExecuteDiscussion:
     @pytest.mark.asyncio
     async def test_multi_round_position_tracking(self) -> None:
         """多轮立场追踪：position_history 正确累积。"""
-        responses = [
-            _make_json("round0 a", {"choice": "X"}),
-            _make_json("round0 b", {"choice": "Y"}),
-            _make_json("round1 a changed", {"choice": "Y"}),
-            _make_json("round1 b", {"choice": "Y"}),
-        ]
-        runner = MockRunner(responses=responses)
+        runner = MockRunner(
+            responses=["round0 a", "round0 b", "round1 a changed", "round1 b"],
+            extraction_responses=[
+                _pos_json({"choice": "X"}),
+                _pos_json({"choice": "Y"}),
+                _pos_json({"choice": "Y"}),
+                _pos_json({"choice": "Y"}),
+            ],
+        )
         a1 = _make_agent("a", runner)
         a2 = _make_agent("b", runner)
 
@@ -418,13 +494,15 @@ class TestExecuteDiscussion:
     @pytest.mark.asyncio
     async def test_convergence_stops_early(self) -> None:
         """收敛检测触发提前终止。"""
-        responses = [
-            _make_json("r0 a", {"choice": "X"}),
-            _make_json("r0 b", {"choice": "Y"}),
-            _make_json("r1 a→Y", {"choice": "Y"}),
-            _make_json("r1 b", {"choice": "Y"}),
-        ]
-        runner = MockRunner(responses=responses)
+        runner = MockRunner(
+            responses=["r0 a", "r0 b", "r1 a→Y", "r1 b"],
+            extraction_responses=[
+                _pos_json({"choice": "X"}),
+                _pos_json({"choice": "Y"}),
+                _pos_json({"choice": "Y"}),
+                _pos_json({"choice": "Y"}),
+            ],
+        )
         a1 = _make_agent("a", runner)
         a2 = _make_agent("b", runner)
 
@@ -452,11 +530,13 @@ class TestExecuteDiscussion:
     @pytest.mark.asyncio
     async def test_until_stops_early(self) -> None:
         """until 回调提前终止。"""
-        responses = [
-            _make_json("r0 a", {"choice": "X"}),
-            _make_json("r0 b", {"choice": "Y"}),
-        ]
-        runner = MockRunner(responses=responses)
+        runner = MockRunner(
+            responses=["r0 a", "r0 b"],
+            extraction_responses=[
+                _pos_json({"choice": "X"}),
+                _pos_json({"choice": "Y"}),
+            ],
+        )
         a1 = _make_agent("a", runner)
         a2 = _make_agent("b", runner)
 
@@ -488,9 +568,10 @@ class TestExecuteDiscussion:
     @pytest.mark.asyncio
     async def test_custom_prompt_template(self) -> None:
         """自定义 prompt_template。"""
-        runner = MockRunner(responses=[
-            _make_json("ok", {"choice": "A"}),
-        ])
+        runner = MockRunner(
+            responses=["ok"],
+            extraction_responses=[_pos_json({"choice": "A"})],
+        )
         a1 = _make_agent("a", runner)
 
         disc = Discussion(
@@ -508,15 +589,20 @@ class TestExecuteDiscussion:
             harness_config=TaskConfig(),
         )
 
-        assert runner.calls[0]["prompt"] == "Custom for a: test"
+        # Phase 1 call uses the custom prompt
+        phase1_calls = [c for c in runner.calls if c["kwargs"].get("output_schema_json") is None]
+        assert phase1_calls[0]["prompt"] == "Custom for a: test"
 
     @pytest.mark.asyncio
     async def test_agent_prompts_override(self) -> None:
         """per-agent prompt override。"""
-        runner = MockRunner(responses=[
-            _make_json("ok", {"choice": "A"}),
-            _make_json("ok", {"choice": "B"}),
-        ])
+        runner = MockRunner(
+            responses=["ok", "ok"],
+            extraction_responses=[
+                _pos_json({"choice": "A"}),
+                _pos_json({"choice": "B"}),
+            ],
+        )
         a1 = _make_agent("a", runner)
         a2 = _make_agent("b", runner)
 
@@ -535,18 +621,21 @@ class TestExecuteDiscussion:
             harness_config=TaskConfig(),
         )
 
-        assert runner.calls[0]["prompt"] == "special prompt for a"
+        phase1_calls = [c for c in runner.calls if c["kwargs"].get("output_schema_json") is None]
+        assert phase1_calls[0]["prompt"] == "special prompt for a"
         # b uses default template
-        assert "test" in runner.calls[1]["prompt"]
+        assert "test" in phase1_calls[1]["prompt"]
 
     @pytest.mark.asyncio
-    async def test_json_parse_failure_degradation(self) -> None:
-        """JSON 解析失败降级：原文作为 response，不中断讨论。"""
-        responses = [
-            "not valid json at all",
-            _make_json("ok", {"choice": "A"}),
-        ]
-        runner = MockRunner(responses=responses)
+    async def test_phase2_extraction_failure_degradation(self) -> None:
+        """Phase 2 提取失败降级：保留上一轮立场，不中断讨论。"""
+        runner = MockRunner(
+            responses=["analysis text", "ok analysis"],
+            extraction_responses=[
+                "not valid json at all",  # Phase 2 失败
+                _pos_json({"choice": "A"}),
+            ],
+        )
         a1 = _make_agent("a", runner)
         a2 = _make_agent("b", runner)
 
@@ -566,8 +655,8 @@ class TestExecuteDiscussion:
 
         output = result.output
         assert output.total_turns == 2
-        # First agent: degraded (raw text as response, no position update)
-        assert output.turns[0].response == "not valid json at all"
+        # First agent: degraded (Phase 2 failed, no position update)
+        assert output.turns[0].response == "analysis text"
         assert output.turns[0].position_changed is False
         # Second agent: normal
         assert output.turns[1].position.choice == "A"
@@ -577,7 +666,10 @@ class TestExecuteDiscussion:
         """进度回调正常调用。"""
         events: list[DiscussionProgressEvent] = []
 
-        runner = MockRunner(responses=[_make_json("ok", {"choice": "A"})])
+        runner = MockRunner(
+            responses=["ok analysis"],
+            extraction_responses=[_pos_json({"choice": "A"})],
+        )
         a1 = _make_agent("a", runner)
 
         disc = Discussion(
@@ -599,12 +691,15 @@ class TestExecuteDiscussion:
         assert events[0].event == "start"
         assert events[0].agent_name == "a"
         assert events[1].event == "complete"
-        assert events[1].content == "ok"
+        assert events[1].content == "ok analysis"
 
     @pytest.mark.asyncio
     async def test_agent_fallback_harness_runner(self) -> None:
         """Agent 无 runner 时 fallback 到 harness_runner。"""
-        runner = MockRunner(responses=[_make_json("ok", {"choice": "A"})])
+        runner = MockRunner(
+            responses=["ok"],
+            extraction_responses=[_pos_json({"choice": "A"})],
+        )
         a1 = Agent(name="a", system_prompt="sp")  # no runner
 
         disc = Discussion(
@@ -625,13 +720,16 @@ class TestExecuteDiscussion:
 
     @pytest.mark.asyncio
     async def test_per_agent_session_isolation(self) -> None:
-        """每个 Agent 使用独立 session。"""
-        runner = MockRunner(responses=[
-            _make_json("r0a", {"choice": "X"}),
-            _make_json("r0b", {"choice": "Y"}),
-            _make_json("r1a", {"choice": "X"}),
-            _make_json("r1b", {"choice": "Y"}),
-        ])
+        """Phase 1 用 agent session，Phase 2 用 session_id=None。"""
+        runner = MockRunner(
+            responses=["r0a", "r0b", "r1a", "r1b"],
+            extraction_responses=[
+                _pos_json({"choice": "X"}),
+                _pos_json({"choice": "Y"}),
+                _pos_json({"choice": "X"}),
+                _pos_json({"choice": "Y"}),
+            ],
+        )
         a1 = _make_agent("a", runner)
         a2 = _make_agent("b", runner)
 
@@ -649,17 +747,27 @@ class TestExecuteDiscussion:
             harness_config=TaskConfig(),
         )
 
-        # Round 0: both agents start with None session
-        assert runner.calls[0]["session_id"] is None
-        assert runner.calls[1]["session_id"] is None
-        # Round 1: each agent resumes its own session
-        assert runner.calls[2]["session_id"] == "sess-1"  # a's session
-        assert runner.calls[3]["session_id"] == "sess-2"  # b's session
+        # Separate Phase 1 and Phase 2 calls
+        phase1_calls = [c for c in runner.calls if c["kwargs"].get("output_schema_json") is None]
+        phase2_calls = [c for c in runner.calls if c["kwargs"].get("output_schema_json") is not None]
+
+        # Round 0: both agents start with None session (Phase 1)
+        assert phase1_calls[0]["session_id"] is None
+        assert phase1_calls[1]["session_id"] is None
+        # Round 1: each agent resumes its own session (Phase 1)
+        assert phase1_calls[2]["session_id"] == "sess-1"  # a's session
+        assert phase1_calls[3]["session_id"] == "sess-2"  # b's session
+        # All Phase 2 calls use session_id=None
+        for call in phase2_calls:
+            assert call["session_id"] is None
 
     @pytest.mark.asyncio
     async def test_background_callable(self) -> None:
         """background 为 callable 时正确解析。"""
-        runner = MockRunner(responses=[_make_json("ok", {"choice": "A"})])
+        runner = MockRunner(
+            responses=["ok"],
+            extraction_responses=[_pos_json({"choice": "A"})],
+        )
         a1 = _make_agent("a", runner)
 
         class MyState(State):
@@ -681,17 +789,20 @@ class TestExecuteDiscussion:
             state=MyState(),
         )
 
-        assert "涨停20家" in runner.calls[0]["prompt"]
+        phase1_calls = [c for c in runner.calls if c["kwargs"].get("output_schema_json") is None]
+        assert "涨停20家" in phase1_calls[0]["prompt"]
 
     @pytest.mark.asyncio
     async def test_position_changed_detection(self) -> None:
         """position_changed 正确检测立场变化。"""
-        responses = [
-            _make_json("round0", {"choice": "X"}),
-            _make_json("round1 same", {"choice": "X"}),
-            _make_json("round2 changed", {"choice": "Y"}),
-        ]
-        runner = MockRunner(responses=responses)
+        runner = MockRunner(
+            responses=["round0", "round1 same", "round2 changed"],
+            extraction_responses=[
+                _pos_json({"choice": "X"}),
+                _pos_json({"choice": "X"}),
+                _pos_json({"choice": "Y"}),
+            ],
+        )
         a1 = _make_agent("a", runner)
 
         disc = Discussion(
@@ -732,7 +843,10 @@ class TestExecuteDiscussion:
     @pytest.mark.asyncio
     async def test_result_task_type(self) -> None:
         """Result.task_type 为 'discussion'。"""
-        runner = MockRunner(responses=[_make_json("ok", {"choice": "A"})])
+        runner = MockRunner(
+            responses=["ok"],
+            extraction_responses=[_pos_json({"choice": "A"})],
+        )
         a1 = _make_agent("a", runner)
         disc = Discussion(agents=[a1], position_schema=SimplePosition, max_rounds=1)
 
@@ -747,9 +861,12 @@ class TestExecuteDiscussion:
         assert result.success is True
 
     @pytest.mark.asyncio
-    async def test_system_prompt_includes_json_schema(self) -> None:
-        """system_prompt 包含 JSON schema 说明。"""
-        runner = MockRunner(responses=[_make_json("ok", {"choice": "A"})])
+    async def test_phase1_no_json_in_system_prompt(self) -> None:
+        """Phase 1 的 system_prompt 不包含 JSON 格式说明。"""
+        runner = MockRunner(
+            responses=["ok"],
+            extraction_responses=[_pos_json({"choice": "A"})],
+        )
         a1 = _make_agent("a", runner)
         disc = Discussion(agents=[a1], position_schema=SimplePosition, max_rounds=1)
 
@@ -760,12 +877,128 @@ class TestExecuteDiscussion:
             harness_config=TaskConfig(),
         )
 
-        sp = runner.calls[0]["system_prompt"]
-        assert "JSON" in sp
-        assert "response" in sp
-        assert "position" in sp
+        phase1_calls = [c for c in runner.calls if c["kwargs"].get("output_schema_json") is None]
+        sp = phase1_calls[0]["system_prompt"]
         assert "global sp" in sp
         assert "You are a" in sp
+        # Phase 1 不包含 JSON schema 指令
+        assert "请用 JSON 格式回复" not in sp
+
+    @pytest.mark.asyncio
+    async def test_phase2_passes_output_schema(self) -> None:
+        """Phase 2 传递 output_schema_json。"""
+        runner = MockRunner(
+            responses=["ok"],
+            extraction_responses=[_pos_json({"choice": "A"})],
+        )
+        a1 = _make_agent("a", runner)
+        disc = Discussion(agents=[a1], position_schema=SimplePosition, max_rounds=1)
+
+        await execute_discussion(
+            disc, 0, [], "run-1",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=TaskConfig(),
+        )
+
+        phase2_calls = [c for c in runner.calls if c["kwargs"].get("output_schema_json") is not None]
+        assert len(phase2_calls) == 1
+        schema = json.loads(phase2_calls[0]["kwargs"]["output_schema_json"])
+        assert "choice" in str(schema)
+
+    @pytest.mark.asyncio
+    async def test_extraction_runner_used(self) -> None:
+        """设置 extraction_runner 时 Phase 2 使用它。"""
+        main_runner = MockRunner(
+            responses=["analysis text"],
+            extraction_responses=[],  # main runner 不应该收到 Phase 2 调用
+        )
+        extract_runner = MockRunner(
+            responses=[],
+            extraction_responses=[_pos_json({"choice": "B"})],
+        )
+        a1 = _make_agent("a", main_runner)
+
+        disc = Discussion(
+            agents=[a1],
+            position_schema=SimplePosition,
+            topic="test",
+            max_rounds=1,
+            extraction_runner=extract_runner,
+        )
+
+        result = await execute_discussion(
+            disc, 0, [], "run-1",
+            harness_system_prompt="",
+            harness_runner=main_runner,
+            harness_config=TaskConfig(),
+        )
+
+        assert result.output.final_positions["a"].choice == "B"
+        # Phase 1 went to main_runner
+        assert main_runner._phase1_count == 1
+        assert main_runner._phase2_count == 0
+        # Phase 2 went to extract_runner
+        assert extract_runner._phase2_count == 1
+        assert extract_runner._phase1_count == 0
+
+    @pytest.mark.asyncio
+    async def test_phase2_timeout(self) -> None:
+        """Phase 2 有独立超时（不超过 60s），超时后降级。"""
+
+        class SlowExtractRunner(AbstractRunner):
+            async def execute(self, prompt, *, system_prompt, session_id, **kwargs) -> RunnerResult:
+                if kwargs.get("output_schema_json") is not None:
+                    import asyncio
+                    await asyncio.sleep(100)  # 超过 60s 超时
+                return RunnerResult(text="ok", tokens_used=5, session_id=None)
+
+        main_runner = MockRunner(
+            responses=["analysis"],
+            extraction_responses=[],
+        )
+        a1 = _make_agent("a", main_runner)
+
+        disc = Discussion(
+            agents=[a1],
+            position_schema=SimplePosition,
+            topic="test",
+            max_rounds=1,
+            extraction_runner=SlowExtractRunner(),
+        )
+
+        result = await execute_discussion(
+            disc, 0, [], "run-1",
+            harness_system_prompt="",
+            harness_runner=main_runner,
+            harness_config=TaskConfig(timeout=120),
+        )
+
+        # Phase 2 超时降级，但讨论不中断
+        output = result.output
+        assert output.total_turns == 1
+        assert output.turns[0].response == "analysis"
+        assert output.turns[0].position_changed is False  # 降级
+
+    @pytest.mark.asyncio
+    async def test_tokens_include_both_phases(self) -> None:
+        """总 tokens = Phase 1 + Phase 2。"""
+        runner = MockRunner(
+            responses=["analysis"],
+            extraction_responses=[_pos_json({"choice": "A"})],
+        )
+        a1 = _make_agent("a", runner)
+        disc = Discussion(agents=[a1], position_schema=SimplePosition, max_rounds=1)
+
+        result = await execute_discussion(
+            disc, 0, [], "run-1",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=TaskConfig(),
+        )
+
+        # Phase 1 = 10 tokens, Phase 2 = 5 tokens
+        assert result.tokens_used == 15
 
 
 # ── Agent.task() ───────────────────────────────────────────────────────────
@@ -839,19 +1072,16 @@ class TestDataClasses:
 class TestMergeSystemPrompt:
     def test_includes_agent_sp(self) -> None:
         agent = _make_agent("analyst")
-        schema = _make_turn_schema(SimplePosition)
-        sp = _merge_system_prompt(agent, schema, "")
+        sp = _merge_system_prompt(agent, "")
         assert "You are analyst" in sp
 
     def test_includes_harness_sp(self) -> None:
         agent = _make_agent("analyst")
-        schema = _make_turn_schema(SimplePosition)
-        sp = _merge_system_prompt(agent, schema, "global instructions")
+        sp = _merge_system_prompt(agent, "global instructions")
         assert "global instructions" in sp
 
-    def test_includes_json_schema(self) -> None:
+    def test_no_json_schema_in_sp(self) -> None:
         agent = _make_agent("analyst")
-        schema = _make_turn_schema(SimplePosition)
-        sp = _merge_system_prompt(agent, schema, "")
-        assert "JSON" in sp
-        assert "response" in sp
+        sp = _merge_system_prompt(agent, "")
+        assert "JSON" not in sp
+        assert "response" not in sp
