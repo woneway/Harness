@@ -55,6 +55,7 @@ async def _execute_turn(
     storage: "StorageProtocol | None",
     run_id: str,
     config: TaskConfig,
+    env_overrides: "dict[str, str] | None" = None,
 ) -> "tuple[DialogueTurn, int]":
     """执行单次角色发言，含超时与重试，更新 session，持久化，返回 (DialogueTurn, tokens)。
 
@@ -115,6 +116,7 @@ async def _execute_turn(
                     system_prompt=merged_system,
                     session_id=role_sessions[role_name],
                     stream_callback=role_stream_cb,
+                    env_overrides=env_overrides,
                 ),
                 timeout=config.timeout,
             )
@@ -182,6 +184,7 @@ async def execute_dialogue(
     harness_runner: "AbstractRunner",
     harness_config: "TaskConfig | None",
     storage: "StorageProtocol | None" = None,
+    env_overrides: "dict[str, str] | None" = None,
 ) -> "Result":
     """执行 Dialogue，支持轮次模式和回合模式。
 
@@ -210,7 +213,7 @@ async def execute_dialogue(
                     role.name, task_index, round_num,
                     dialogue, history, pipeline_results,
                     role_sessions, harness_system_prompt, harness_runner,
-                    storage, run_id, config,
+                    storage, run_id, config, env_overrides,
                 )
                 history.append(turn)
                 total_tokens += turn_tokens
@@ -263,7 +266,7 @@ async def execute_dialogue(
                 next_role_name, task_index, turn_num,
                 dialogue, history, pipeline_results,
                 role_sessions, harness_system_prompt, harness_runner,
-                storage, run_id, config,
+                storage, run_id, config, env_overrides,
             )
             history.append(turn)
             total_tokens += turn_tokens

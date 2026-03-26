@@ -427,6 +427,7 @@ class Harness:
                     r = await execute_polling(
                         task, task_index, results, run_id,
                         harness_config=self._default_config,
+                        env_overrides=self._env_overrides,
                     )
                 elif isinstance(task, Dialogue):
                     r = await execute_dialogue(
@@ -438,6 +439,7 @@ class Harness:
                         harness_runner=self._runner,
                         harness_config=self._default_config,
                         storage=self._storage,
+                        env_overrides=self._env_overrides,
                     )
                 else:
                     raise TypeError(f"Unknown task type: {type(task)}")
