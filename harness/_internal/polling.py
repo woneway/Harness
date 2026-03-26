@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from typing import Any
 
@@ -17,6 +18,7 @@ async def execute_polling(
     run_id: str,
     *,
     harness_config: TaskConfig | None = None,
+    env_overrides: dict[str, str] | None = None,
 ) -> Result:
     """执行 PollingTask：submit → 循环 poll → 返回最终结果。
 
@@ -35,7 +37,7 @@ async def execute_polling(
         # 若 config.timeout < task.timeout，asyncio.wait_for 优先触发。
         try:
             result, error = await asyncio.wait_for(
-                _run_once(task, task_index, results, run_id, config),
+                _run_once(task, task_index, results, run_id, config, env_overrides),
                 timeout=config.timeout,
             )
         except asyncio.TimeoutError:
@@ -63,55 +65,74 @@ async def _run_once(
     results: list[Result],
     run_id: str,
     config: TaskConfig,
+    env_overrides: dict[str, str] | None = None,
 ) -> tuple[Result | None, str]:
     """执行一次 submit + poll 循环，成功返回 (Result, "")，失败返回 (None, error_msg)。"""
     from pydantic import ValidationError
 
     start_time = time.monotonic()
 
-    # submit
+    # 应用 env_overrides（submit_fn / poll_fn 可能依赖环境变量）
+    _orig_env: dict[str, str | None] = {}
+    if env_overrides:
+        for key, val in env_overrides.items():
+            _orig_env[key] = os.environ.get(key)
+            if val == "":
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+
     try:
-        handle: Any = task.submit_fn(results)
-    except Exception as e:
-        return None, f"submit_fn raised: {e}"
-
-    # poll 循环
-    deadline = time.monotonic() + task.timeout
-
-    while True:
-        if time.monotonic() > deadline:
-            return None, f"polling timed out after {task.timeout}s"
-
-        await asyncio.sleep(task.poll_interval)
-
+        # submit
         try:
-            response = task.poll_fn(handle)
+            handle: Any = task.submit_fn(results)
         except Exception as e:
-            return None, f"poll_fn raised: {e}"
+            return None, f"submit_fn raised: {e}"
 
-        # success_condition
-        if task.success_condition(response):
-            duration = time.monotonic() - start_time
-            output: Any = response
+        # poll 循环
+        deadline = time.monotonic() + task.timeout
 
-            # output_schema 校验
-            if task.output_schema is not None:
-                try:
-                    output = task.output_schema.model_validate(response)
-                except (ValidationError, Exception) as e:
-                    return None, f"output_schema validation failed: {e}"
+        while True:
+            if time.monotonic() > deadline:
+                return None, f"polling timed out after {task.timeout}s"
 
-            return Result(
-                task_index=task_index,
-                task_type="polling",
-                output=output,
-                raw_text=None,
-                tokens_used=0,
-                duration_seconds=duration,
-                success=True,
-                error=None,
-            ), ""
+            await asyncio.sleep(task.poll_interval)
 
-        # failure_condition
-        if task.failure_condition is not None and task.failure_condition(response):
-            return None, "failure_condition triggered"
+            try:
+                response = task.poll_fn(handle)
+            except Exception as e:
+                return None, f"poll_fn raised: {e}"
+
+            # success_condition
+            if task.success_condition(response):
+                duration = time.monotonic() - start_time
+                output: Any = response
+
+                # output_schema 校验
+                if task.output_schema is not None:
+                    try:
+                        output = task.output_schema.model_validate(response)
+                    except (ValidationError, Exception) as e:
+                        return None, f"output_schema validation failed: {e}"
+
+                return Result(
+                    task_index=task_index,
+                    task_type="polling",
+                    output=output,
+                    raw_text=None,
+                    tokens_used=0,
+                    duration_seconds=duration,
+                    success=True,
+                    error=None,
+                ), ""
+
+            # failure_condition
+            if task.failure_condition is not None and task.failure_condition(response):
+                return None, "failure_condition triggered"
+    finally:
+        if env_overrides:
+            for key, orig_val in _orig_env.items():
+                if orig_val is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = orig_val

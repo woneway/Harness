@@ -329,7 +329,9 @@ async def _execute_one(
         )
     elif isinstance(task, PollingTask):
         return await execute_polling(
-            task, task_index, results, run_id, harness_config=harness_config
+            task, task_index, results, run_id,
+            harness_config=harness_config,
+            env_overrides=env_overrides,
         )
     else:
         raise TypeError(f"Unknown task type: {type(task)}")

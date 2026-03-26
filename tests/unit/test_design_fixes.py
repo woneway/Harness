@@ -276,6 +276,191 @@ class TestIterSseEvents:
 
 
 # ---------------------------------------------------------------------------
+# Fix #6: Dialogue env_overrides passthrough
+# ---------------------------------------------------------------------------
+
+
+class TestDialogueEnvOverrides:
+    @pytest.mark.asyncio
+    async def test_dialogue_passes_env_overrides_to_runner(self) -> None:
+        """execute_dialogue 将 env_overrides 传递到 runner.execute()。"""
+        from harness._internal.dialogue import execute_dialogue
+        from harness.task import Dialogue, Role
+
+        captured_kwargs: dict = {}
+
+        class CapturingRunner(AbstractRunner):
+            async def execute(self, prompt, *, system_prompt, session_id, **kwargs) -> RunnerResult:
+                captured_kwargs.update(kwargs)
+                return RunnerResult(text="done", tokens_used=1, session_id=None)
+
+        runner = CapturingRunner()
+        dialogue = Dialogue(
+            roles=[
+                Role(name="A", prompt=lambda ctx: "hello", system_prompt=""),
+            ],
+            background="",
+            max_rounds=1,
+        )
+
+        await execute_dialogue(
+            dialogue,
+            outer_index=0,
+            pipeline_results=[],
+            run_id="run-1",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=None,
+            env_overrides={"MY_VAR": "my_value"},
+        )
+
+        assert captured_kwargs.get("env_overrides") == {"MY_VAR": "my_value"}
+
+    @pytest.mark.asyncio
+    async def test_dialogue_env_overrides_none_by_default(self) -> None:
+        """execute_dialogue 默认 env_overrides=None。"""
+        from harness._internal.dialogue import execute_dialogue
+        from harness.task import Dialogue, Role
+
+        captured_kwargs: dict = {}
+
+        class CapturingRunner(AbstractRunner):
+            async def execute(self, prompt, *, system_prompt, session_id, **kwargs) -> RunnerResult:
+                captured_kwargs.update(kwargs)
+                return RunnerResult(text="done", tokens_used=1, session_id=None)
+
+        runner = CapturingRunner()
+        dialogue = Dialogue(
+            roles=[
+                Role(name="A", prompt=lambda ctx: "hello", system_prompt=""),
+            ],
+            background="",
+            max_rounds=1,
+        )
+
+        await execute_dialogue(
+            dialogue,
+            outer_index=0,
+            pipeline_results=[],
+            run_id="run-1",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=None,
+        )
+
+        assert captured_kwargs.get("env_overrides") is None
+
+
+# ---------------------------------------------------------------------------
+# Fix #7: PollingTask env_overrides passthrough
+# ---------------------------------------------------------------------------
+
+
+class TestPollingEnvOverrides:
+    @pytest.mark.asyncio
+    async def test_polling_applies_env_overrides(self) -> None:
+        """execute_polling 在 submit_fn/poll_fn 执行期间应用 env_overrides。"""
+        from harness._internal.polling import execute_polling
+        from harness.task import PollingTask
+
+        captured_env: dict = {}
+
+        def submit_fn(results):
+            captured_env["submit"] = os.environ.get("POLL_TEST_VAR")
+            return "handle"
+
+        call_count = {"n": 0}
+        def poll_fn(handle):
+            call_count["n"] += 1
+            captured_env["poll"] = os.environ.get("POLL_TEST_VAR")
+            return {"done": True}
+
+        task = PollingTask(
+            submit_fn=submit_fn,
+            poll_fn=poll_fn,
+            success_condition=lambda r: r.get("done"),
+            timeout=5,
+            poll_interval=0.01,
+        )
+
+        result = await execute_polling(
+            task, "0", [], "run-1",
+            harness_config=None,
+            env_overrides={"POLL_TEST_VAR": "injected"},
+        )
+
+        assert result.success
+        assert captured_env["submit"] == "injected"
+        assert captured_env["poll"] == "injected"
+        # 环境已恢复
+        assert os.environ.get("POLL_TEST_VAR") is None
+
+    @pytest.mark.asyncio
+    async def test_polling_restores_env_on_failure(self) -> None:
+        """env_overrides 在 submit_fn 异常后也能恢复。"""
+        from harness._internal.polling import execute_polling
+        from harness.task import PollingTask, TaskConfig
+
+        def submit_fn(results):
+            raise RuntimeError("boom")
+
+        task = PollingTask(
+            submit_fn=submit_fn,
+            poll_fn=lambda h: None,
+            success_condition=lambda r: True,
+            timeout=1,
+            poll_interval=0.01,
+            config=TaskConfig(max_retries=0, timeout=5),
+        )
+
+        with pytest.raises(Exception):
+            await execute_polling(
+                task, "0", [], "run-1",
+                harness_config=None,
+                env_overrides={"POLL_CLEANUP_VAR": "temp"},
+            )
+
+        assert os.environ.get("POLL_CLEANUP_VAR") is None
+
+
+# ---------------------------------------------------------------------------
+# Fix #8: _env_locks cleanup (no memory leak)
+# ---------------------------------------------------------------------------
+
+
+class TestEnvLocksCleanup:
+    @pytest.mark.asyncio
+    async def test_stale_locks_cleaned_on_next_call(self) -> None:
+        """已销毁事件循环的 Lock 条目在下次调用时被清理。"""
+        from harness._internal.executor import _env_locks, _get_env_lock
+
+        # 记录当前条目数
+        initial_count = len(_env_locks)
+
+        # 插入一个伪造的过期条目（weakref 指向 None）
+        import weakref
+        fake_id = 99999999
+        # 创建一个临时对象并让 weakref 失效
+        class Dummy:
+            pass
+        tmp = Dummy()
+        ref = weakref.ref(tmp)
+        _env_locks[fake_id] = (ref, asyncio.Lock())
+        del tmp  # weakref 失效
+
+        # 调用 _get_env_lock 应清理过期条目
+        _get_env_lock()
+        assert fake_id not in _env_locks
+
+    @pytest.mark.asyncio
+    async def test_same_loop_returns_same_lock(self) -> None:
+        """同一事件循环返回同一个 Lock 实例。"""
+        lock1 = _get_env_lock()
+        lock2 = _get_env_lock()
+        assert lock1 is lock2
+
+
+# ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
 

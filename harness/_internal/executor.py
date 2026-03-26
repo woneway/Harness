@@ -35,16 +35,29 @@ if TYPE_CHECKING:
 
 # 保护 os.environ 并发修改，防止 Parallel 内多个 FunctionTask 竞态。
 # 每个事件循环绑定独立 Lock，避免跨 loop 共享导致 RuntimeError。
-_env_locks: dict[int, asyncio.Lock] = {}
+# 使用 (id, weakref) 对来自动清理已销毁的事件循环对应的 Lock。
+import weakref
+
+_env_locks: dict[int, tuple[weakref.ref, asyncio.Lock]] = {}
 
 
 def _get_env_lock() -> asyncio.Lock:
-    """获取当前事件循环绑定的 env_lock。"""
+    """获取当前事件循环绑定的 env_lock，自动清理已销毁循环的条目。"""
     loop = asyncio.get_running_loop()
     loop_id = id(loop)
-    if loop_id not in _env_locks:
-        _env_locks[loop_id] = asyncio.Lock()
-    return _env_locks[loop_id]
+
+    # 清理已销毁的事件循环对应的 Lock（避免内存泄漏）
+    stale = [k for k, (ref, _) in _env_locks.items() if ref() is None]
+    for k in stale:
+        del _env_locks[k]
+
+    entry = _env_locks.get(loop_id)
+    if entry is not None and entry[0]() is not None:
+        return entry[1]
+
+    lock = asyncio.Lock()
+    _env_locks[loop_id] = (weakref.ref(loop), lock)
+    return lock
 
 
 def _effective_config(
