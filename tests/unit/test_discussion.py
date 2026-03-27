@@ -663,7 +663,7 @@ class TestExecuteDiscussion:
 
     @pytest.mark.asyncio
     async def test_progress_callback(self) -> None:
-        """进度回调正常调用。"""
+        """进度回调正常调用，包含 phase 事件。"""
         events: list[DiscussionProgressEvent] = []
 
         runner = MockRunner(
@@ -687,11 +687,19 @@ class TestExecuteDiscussion:
             harness_config=TaskConfig(),
         )
 
-        assert len(events) == 2
+        event_types = [e.event for e in events]
+        assert event_types == ["start", "phase", "phase", "complete"]
         assert events[0].event == "start"
         assert events[0].agent_name == "a"
-        assert events[1].event == "complete"
-        assert events[1].content == "ok analysis"
+        # Phase 1 event
+        assert events[1].event == "phase"
+        assert "Phase 1" in events[1].content
+        # Phase 2 event
+        assert events[2].event == "phase"
+        assert "Phase 2" in events[2].content
+        # Complete event
+        assert events[3].event == "complete"
+        assert events[3].content == "ok analysis"
 
     @pytest.mark.asyncio
     async def test_agent_fallback_harness_runner(self) -> None:

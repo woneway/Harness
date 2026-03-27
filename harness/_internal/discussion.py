@@ -285,6 +285,15 @@ async def _execute_agent_turn(
 
         try:
             # ── Phase 1: 自由文本分析 ──
+            if discussion.progress_callback:
+                discussion.progress_callback(
+                    DiscussionProgressEvent(
+                        event="phase",
+                        round=round_num,
+                        agent_name=agent.name,
+                        content="Phase 1: 自由文本分析",
+                    )
+                )
             phase1_result = await asyncio.wait_for(
                 runner.execute(
                     prompt_text,
@@ -310,6 +319,15 @@ async def _execute_agent_turn(
             total_tokens = phase1_result.tokens_used
 
             # ── Phase 2: 立场提取 ──
+            if discussion.progress_callback:
+                discussion.progress_callback(
+                    DiscussionProgressEvent(
+                        event="phase",
+                        round=round_num,
+                        agent_name=agent.name,
+                        content="Phase 2: 立场提取",
+                    )
+                )
             prev_position = ctx.my_position
             extraction_prompt = _build_extraction_prompt(
                 response_text, discussion.position_schema,

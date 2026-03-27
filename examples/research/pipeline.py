@@ -64,6 +64,8 @@ def _progress_handler(e) -> None:
     """Discussion 进度回调。"""
     if e.event == "streaming":
         print(e.content or "", end="", flush=True)
+    elif e.event == "phase":
+        print(f"\n  [{e.agent_name}] {e.content}", flush=True)
     elif e.event == "start":
         print(f"\n  [{e.event}] {e.agent_name}", flush=True)
     elif e.event == "complete":
