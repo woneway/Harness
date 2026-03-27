@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from datetime import date
 from pathlib import Path
 
@@ -15,6 +17,8 @@ from harness import (
 from harness.runners.base import AbstractRunner
 from harness.tasks.discussion import all_agree_on
 
+logger = logging.getLogger(__name__)
+
 from .agents import create_agents
 from .schemas.position import ProjectEvaluation
 from .state import ResearchState
@@ -22,7 +26,7 @@ from .tasks.collect_github import collect_github
 from .tasks.parse_input import parse_input
 
 # SecondBrain 输出路径
-SECONDBRAIN_TECH_DIR = Path.home() / "ai" / "SecondBrain" / "Knowledge" / "Areas" / "Tech"
+SECONDBRAIN_DIR = Path.home() / "ai" / "SecondBrain"
 
 
 def _progress_handler(e) -> None:
@@ -38,11 +42,24 @@ def _progress_handler(e) -> None:
         print(f"\n  [{e.event}] {e.agent_name}{content_preview}", flush=True)
 
 
+def _parse_competitors_json(state: ResearchState) -> list[dict]:
+    """将 LLMTask 返回的 JSON 字符串解析为 list[dict]，写入 state.competitors。"""
+    raw = state.competitors
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            state.competitors = parsed if isinstance(parsed, list) else []
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse competitors JSON: %s", raw[:200])
+            state.competitors = []
+    return state.competitors
+
+
 def _save_report(state: ResearchState) -> str:
     """将报告写入 SecondBrain 知识库。"""
     name = state.target_project or "research"
     filename = f"{name.lower().replace(' ', '-')}-research.md"
-    output_path = SECONDBRAIN_TECH_DIR / filename
+    output_path = SECONDBRAIN_DIR / filename
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(state.report, encoding="utf-8")
@@ -83,13 +100,13 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
 
         # Step 1: 发现竞品（仅 topic/project 模式需要）
         Condition(
-            check=lambda s: s.input_type in ("topic", "project") and not s.competitors,
+            check=lambda state: state.input_type in ("topic", "project") and not state.competitors,
             if_true=[
                 LLMTask(
-                    prompt=lambda s: (
-                        f"我需要调研{'主题: ' + s.raw_input if s.input_type == 'topic' else '项目: ' + s.target_project}。\n\n"
-                        f"请搜索并找出这个{'领域' if s.input_type == 'topic' else '项目'}的 3-5 个最相关的开源项目"
-                        f"{'（包括该项目本身的 GitHub URL）' if s.input_type == 'project' else ''}。\n\n"
+                    prompt=lambda state: (
+                        f"我需要调研{'主题: ' + state.raw_input if state.input_type == 'topic' else '项目: ' + state.target_project}。\n\n"
+                        f"请搜索并找出这个{'领域' if state.input_type == 'topic' else '项目'}的 3-5 个最相关的开源项目"
+                        f"{'（包括该项目本身的 GitHub URL）' if state.input_type == 'project' else ''}。\n\n"
                         f"对每个项目，给出：\n"
                         f"1. 项目名称\n"
                         f"2. GitHub URL（owner/repo 格式）\n"
@@ -99,19 +116,20 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
                     ),
                     output_key="competitors",
                 ),
+                FunctionTask(fn=_parse_competitors_json),
             ],
         ),
 
         # Step 2: 并行采集数据
         Parallel([
             # 2.0: GitHub 定量指标
-            FunctionTask(fn=collect_github, output_key="github_metrics"),
+            FunctionTask(fn=collect_github),  # mutates state.github_metrics directly
             # 2.1: 定性信息（由 Claude 搜索和分析）
             LLMTask(
-                prompt=lambda s: (
+                prompt=lambda state: (
                     f"请对以下开源项目进行详细的定性调研：\n\n"
-                    f"主项目：{s.target_project}\n"
-                    f"对比项目：{', '.join(c.get('name', '') for c in s.competitors) if s.competitors else '无'}\n\n"
+                    f"主项目：{state.target_project}\n"
+                    f"对比项目：{', '.join(c.get('name', '') for c in state.competitors if isinstance(c, dict)) if state.competitors else '无'}\n\n"
                     f"对每个项目，请通过搜索和阅读官方文档/README，分析：\n"
                     f"1. 核心功能和设计理念\n"
                     f"2. 技术架构和关键抽象\n"
@@ -128,11 +146,11 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
         Discussion(
             agents=[tech_analyst, community_assessor, architect],
             position_schema=ProjectEvaluation,
-            topic=lambda s: f"评估对比：{s.target_project} 及其同类项目",
-            background=lambda s: (
-                f"## 调研目标\n{s.raw_input}\n\n"
-                f"## GitHub 指标\n{_format_metrics(s.github_metrics)}\n\n"
-                f"## 定性分析\n{s.qualitative_info[:3000]}"
+            topic="评估对比开源项目及其同类竞品",
+            background=lambda state: (
+                f"## 调研目标\n{state.raw_input}\n\n"
+                f"## GitHub 指标\n{_format_metrics(state.github_metrics)}\n\n"
+                f"## 定性分析\n{state.qualitative_info[:3000]}"
             ),
             max_rounds=3,
             convergence=all_agree_on("recommendation"),
@@ -142,7 +160,7 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
 
         # Step 4: 生成最终报告
         LLMTask(
-            prompt=lambda s: (
+            prompt=lambda state: (
                 f"基于以下调研数据和多 Agent 讨论结果，生成一份完整的 Markdown 调研报告。\n\n"
                 f"## 要求\n"
                 f"1. 报告必须以 YAML front matter 开头（见下方格式）\n"
@@ -152,19 +170,19 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
                 f"## YAML Front Matter 格式\n"
                 f"```yaml\n"
                 f"---\n"
-                f"title: \"{s.target_project} 调研 — [一句话描述]\"\n"
-                f"tags: [{s.target_project}, research, open-source]\n"
+                f"title: \"{state.target_project} 调研 — [一句话描述]\"\n"
+                f"tags: [{state.target_project}, research, open-source]\n"
                 f"created: {today}\n"
                 f"updated: {today}\n"
                 f"type: research\n"
                 f"status: active\n"
                 f"---\n"
                 f"```\n\n"
-                f"## GitHub 指标数据\n{_format_metrics(s.github_metrics)}\n\n"
-                f"## 定性分析\n{s.qualitative_info[:2000]}\n\n"
+                f"## GitHub 指标数据\n{_format_metrics(state.github_metrics)}\n\n"
+                f"## 定性分析\n{state.qualitative_info[:2000]}\n\n"
                 f"## Discussion 结果\n"
-                f"收敛: {s.discussion.converged if s.discussion else 'N/A'}\n"
-                f"轮数: {s.discussion.rounds_completed if s.discussion else 'N/A'}\n\n"
+                f"收敛: {state.discussion.converged if state.discussion else 'N/A'}\n"
+                f"轮数: {state.discussion.rounds_completed if state.discussion else 'N/A'}\n\n"
                 f"最终立场：\n"
                 + (
                     "\n".join(
@@ -172,9 +190,9 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
                         f"  优势: {', '.join(pos.strengths)}\n"
                         f"  劣势: {', '.join(pos.weaknesses)}\n"
                         f"  最佳场景: {pos.best_for}"
-                        for name, pos in (s.discussion.final_positions or {}).items()
+                        for name, pos in (state.discussion.final_positions or {}).items()
                     )
-                    if s.discussion and s.discussion.final_positions
+                    if state.discussion and state.discussion.final_positions
                     else "无讨论结果"
                 )
             ),
