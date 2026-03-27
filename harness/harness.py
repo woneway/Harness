@@ -6,11 +6,13 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
+from harness._internal.condition import execute_condition
 from harness._internal.deserialize import deserialize_output
+from harness._internal.discussion import execute_discussion
 from harness._internal.exceptions import InvalidPipelineError, ResumeSchemaError, TaskFailedError
 from harness._internal.task_index import TaskIndex
 from harness._internal.executor import (
@@ -19,6 +21,7 @@ from harness._internal.executor import (
     execute_shell_task,
 )
 from harness._internal.dialogue import execute_dialogue
+from harness._internal.loop import execute_loop
 from harness._internal.parallel import execute_parallel
 from harness._internal.polling import execute_polling
 from harness._internal.session import SessionManager
@@ -26,11 +29,15 @@ from harness.memory import Memory
 from harness.notifier.base import AbstractNotifier
 from harness.runners.base import AbstractRunner
 from harness.runners.claude_cli import ClaudeCliRunner
+from harness.state import State
 from harness.storage.sql import SQLStorage
-from harness.task import (
+from harness.tasks import (
+    Condition,
     Dialogue,
+    Discussion,
     FunctionTask,
     LLMTask,
+    Loop,
     Parallel,
     PipelineResult,
     PipelineStep,
@@ -129,6 +136,7 @@ class Harness:
 
         self._storage: SQLStorage | None = None
         self._scheduler = None
+        self._service_runner: "ServiceRunner | None" = None
         self._initialized = False
 
     async def _ensure_initialized(self) -> None:
@@ -169,7 +177,7 @@ class Harness:
         Args:
             step: LLMTask 的 prompt（str 或 Callable），或直接传入 PipelineStep（如 Dialogue）。
         """
-        if isinstance(step, (LLMTask, Dialogue, FunctionTask, ShellTask, PollingTask, Parallel)):
+        if isinstance(step, (LLMTask, Dialogue, Discussion, FunctionTask, ShellTask, PollingTask, Parallel)):
             if output_schema is not None or config is not None:
                 import warnings
                 warnings.warn(
@@ -190,6 +198,7 @@ class Harness:
         *,
         name: str | None = None,
         resume_from: str | None = None,
+        state: State | None = None,
     ) -> PipelineResult:
         """执行多步流水线。
 
@@ -197,6 +206,7 @@ class Harness:
             tasks: 任务列表。
             name: 可选名称，存入 runs 表。
             resume_from: 从指定 run_id 续跑，跳过已成功的步骤。
+            state: v2 State 对象；None 时自动创建默认 State。
 
         Returns:
             PipelineResult 包含所有步骤结果。
@@ -207,7 +217,7 @@ class Harness:
         """
         await self._ensure_initialized()
 
-        # 入口校验：嵌套 Parallel
+        # 入口校验
         for i, task in enumerate(tasks):
             if isinstance(task, Parallel):
                 for subtask in task.tasks:
@@ -216,11 +226,25 @@ class Harness:
                             f"Nested Parallel is not supported. "
                             f"Found at index {i}."
                         )
+                    if isinstance(subtask, (Condition, Loop)):
+                        raise InvalidPipelineError(
+                            f"Condition/Loop inside Parallel is not supported in v2.0. "
+                            f"Found at index {i}."
+                        )
+                    if isinstance(subtask, Discussion):
+                        raise InvalidPipelineError(
+                            f"Discussion inside Parallel is not supported. "
+                            f"Found at index {i}."
+                        )
 
         run_id = str(uuid.uuid4())
         assert self._storage is not None
 
         await self._storage.save_run(run_id, str(self._project_path), name)
+
+        # 初始化 State
+        if state is None:
+            state = State()
 
         # 获取 resume 信息
         skipped_indices: set[str] = set()
@@ -289,6 +313,10 @@ class Harness:
             session_manager.reset()
 
         results: list[Result] = list(resumed_results)
+        # 同步 state._results 与 resumed_results
+        for r in resumed_results:
+            state._append_result(r)
+
         total_tokens = sum(r.tokens_used for r in results)
         start_time = time.monotonic()
 
@@ -330,6 +358,7 @@ class Harness:
                         harness_stream_callback=self._stream_callback,
                         harness_raw_stream_callback=self._raw_stream_callback,
                         env_overrides=self._env_overrides or None,
+                        state=state,
                     )
                     # Bug2 修复：并发 LLMTask 各自使用独立 session，完成后外部
                     # session 已无法确定从哪个子 session 续跑，统一 mark_broken。
@@ -356,6 +385,17 @@ class Harness:
                         )
                         total_tokens += r.tokens_used
                     results.extend(sub_results)
+                    # 同步 state
+                    for r in sub_results:
+                        state._append_result(r)
+                        # Parallel 子任务的 output_key 写入
+                        sub_output_key = getattr(
+                            task.tasks[TaskIndex.parse(r.task_index).par_child_int()]
+                            if r.task_index != task_index else task,
+                            "output_key", None
+                        )
+                        if sub_output_key and r.success:
+                            state._set_output(sub_output_key, r.output)
                     continue
 
                 # 解析有效回调（Task 级覆写 Harness 级）
@@ -386,6 +426,7 @@ class Harness:
                         config=task.config,
                         stream_callback=effective_cb,
                         raw_stream_callback=effective_raw_cb,
+                        output_key=task.output_key,
                     )
                     r = await execute_llm_task(
                         task_with_cb,
@@ -400,6 +441,7 @@ class Harness:
                         storage=self._storage,
                         is_new_session=session_manager.is_broken,
                         env_overrides=self._env_overrides,
+                        state=state,
                     )
                     # 检查 memory_update
                     if (
@@ -416,18 +458,21 @@ class Harness:
                         task, task_index, results, run_id,
                         harness_config=self._default_config,
                         env_overrides=self._env_overrides,
+                        state=state,
                     )
                 elif isinstance(task, ShellTask):
                     r = await execute_shell_task(
                         task, task_index, results, run_id,
                         harness_config=self._default_config,
                         env_overrides=self._env_overrides,
+                        state=state,
                     )
                 elif isinstance(task, PollingTask):
                     r = await execute_polling(
                         task, task_index, results, run_id,
                         harness_config=self._default_config,
                         env_overrides=self._env_overrides,
+                        state=state,
                     )
                 elif isinstance(task, Dialogue):
                     r = await execute_dialogue(
@@ -440,7 +485,76 @@ class Harness:
                         harness_config=self._default_config,
                         storage=self._storage,
                         env_overrides=self._env_overrides,
+                        state=state,
                     )
+                elif isinstance(task, Discussion):
+                    r = await execute_discussion(
+                        discussion=task,
+                        outer_index=outer_index,
+                        pipeline_results=results,
+                        run_id=run_id,
+                        harness_system_prompt=self._system_prompt,
+                        harness_runner=self._runner,
+                        harness_config=self._default_config,
+                        storage=self._storage,
+                        state=state,
+                    )
+                elif isinstance(task, Condition):
+                    # Condition 递归执行子步骤
+                    async def _exec_step_for_cond(step: PipelineStep, ti: str, st: State) -> Result:
+                        return await self._execute_single_step(
+                            step, ti, results, run_id, session_manager,
+                            memory_injection, state=st, last_llm_index=None,
+                            outer_index=None,
+                        )
+
+                    sub_results = await execute_condition(
+                        task, outer_index, state, execute_step=_exec_step_for_cond,
+                    )
+                    for r in sub_results:
+                        await self._storage.save_task_log(
+                            run_id, r.task_index, r.task_type,
+                            output=r.output,
+                            output_schema_class=None,
+                            raw_text=r.raw_text,
+                            tokens_used=r.tokens_used,
+                            duration_seconds=r.duration_seconds,
+                            success=r.success,
+                            error=r.error,
+                        )
+                        total_tokens += r.tokens_used
+                        results.append(r)
+                        state._append_result(r)
+                    continue
+
+                elif isinstance(task, Loop):
+                    # Loop 递归执行子步骤
+                    async def _exec_step_for_loop(step: PipelineStep, ti: str, st: State) -> Result:
+                        return await self._execute_single_step(
+                            step, ti, results, run_id, session_manager,
+                            memory_injection, state=st, last_llm_index=None,
+                            outer_index=None,
+                        )
+
+                    sub_results = await execute_loop(
+                        task, outer_index, state, execute_step=_exec_step_for_loop,
+                    )
+                    for r in sub_results:
+                        await self._storage.save_task_log(
+                            run_id, r.task_index, r.task_type,
+                            output=r.output,
+                            output_schema_class=None,
+                            raw_text=r.raw_text,
+                            tokens_used=r.tokens_used,
+                            duration_seconds=r.duration_seconds,
+                            success=r.success,
+                            error=r.error,
+                        )
+                        total_tokens += r.tokens_used
+                        results.append(r)
+                        state._append_result(r)
+                    continue
+
                 else:
                     raise TypeError(f"Unknown task type: {type(task)}")
 
@@ -458,6 +572,12 @@ class Harness:
                 )
                 total_tokens += r.tokens_used
                 results.append(r)
+
+                # 同步 state
+                state._append_result(r)
+                output_key = getattr(task, "output_key", None)
+                if output_key and r.success:
+                    state._set_output(output_key, r.output)
 
         except TaskFailedError as e:
             # 写失败状态
@@ -512,6 +632,158 @@ class Harness:
             total_duration_seconds=total_duration,
         )
 
+    async def _execute_single_step(
+        self,
+        task: PipelineStep,
+        task_index: str,
+        results: list[Result],
+        run_id: str,
+        session_manager: SessionManager,
+        memory_injection: str,
+        *,
+        state: State,
+        last_llm_index: int | None,
+        outer_index: int | None,
+    ) -> Result:
+        """执行单个 PipelineStep（供 Condition/Loop 递归调用）。
+
+        不处理 Parallel/Condition/Loop（子步骤只支持原子任务类型和 Dialogue）。
+        不负责 save_task_log 和 results 追加（调用方负责）。
+        """
+        effective_cb = task.stream_callback or self._stream_callback
+        effective_raw_cb = task.raw_stream_callback or self._raw_stream_callback
+
+        if isinstance(task, LLMTask):
+            task_with_cb = LLMTask(
+                prompt=task.prompt,
+                system_prompt=task.system_prompt,
+                output_schema=task.output_schema,
+                runner=task.runner,
+                config=task.config,
+                stream_callback=effective_cb,
+                raw_stream_callback=effective_raw_cb,
+                output_key=task.output_key,
+            )
+            r = await execute_llm_task(
+                task_with_cb,
+                task_index,
+                results,
+                run_id,
+                harness_system_prompt=self._system_prompt,
+                harness_runner=self._runner,
+                harness_config=self._default_config,
+                session_manager=session_manager,
+                memory_injection=memory_injection,
+                storage=self._storage,
+                is_new_session=session_manager.is_broken,
+                env_overrides=self._env_overrides,
+                state=state,
+            )
+        elif isinstance(task, FunctionTask):
+            r = await execute_function_task(
+                task, task_index, results, run_id,
+                harness_config=self._default_config,
+                env_overrides=self._env_overrides,
+                state=state,
+            )
+        elif isinstance(task, ShellTask):
+            r = await execute_shell_task(
+                task, task_index, results, run_id,
+                harness_config=self._default_config,
+                env_overrides=self._env_overrides,
+                state=state,
+            )
+        elif isinstance(task, PollingTask):
+            r = await execute_polling(
+                task, task_index, results, run_id,
+                harness_config=self._default_config,
+                env_overrides=self._env_overrides,
+                state=state,
+            )
+        elif isinstance(task, Dialogue):
+            # Dialogue 内部使用 outer_index 解析 task_index
+            # 从传入的 task_index 解析出 outer
+            parsed = TaskIndex.parse(task_index)
+            r = await execute_dialogue(
+                dialogue=task,
+                outer_index=parsed.outer,
+                pipeline_results=results,
+                run_id=run_id,
+                harness_system_prompt=self._system_prompt,
+                harness_runner=self._runner,
+                harness_config=self._default_config,
+                storage=self._storage,
+                env_overrides=self._env_overrides,
+                state=state,
+            )
+        elif isinstance(task, Discussion):
+            parsed = TaskIndex.parse(task_index)
+            r = await execute_discussion(
+                discussion=task,
+                outer_index=parsed.outer,
+                pipeline_results=results,
+                run_id=run_id,
+                harness_system_prompt=self._system_prompt,
+                harness_runner=self._runner,
+                harness_config=self._default_config,
+                storage=self._storage,
+                state=state,
+            )
+        else:
+            raise TypeError(f"Unsupported task type in Condition/Loop: {type(task)}")
+
+        # output_key 写入 state
+        output_key = getattr(task, "output_key", None)
+        if output_key and r.success:
+            state._set_output(output_key, r.output)
+
+        return r
+
+    def service(
+        self,
+        name: str,
+        triggers: "list[Trigger]",
+        handler: "Callable[[TriggerContext], Awaitable[list[PipelineStep] | PipelineStep]]",
+        *,
+        state_factory: Callable[[], State] | None = None,
+        pipeline_name: str | None = None,
+    ) -> None:
+        """注册长驻服务。
+
+        触发时调用 handler 获取 pipeline steps，然后执行 pipeline()。
+
+        Args:
+            name: 服务名称（唯一）。
+            triggers: 触发器列表（CronTrigger / EventTrigger）。
+            handler: async callable，接收 TriggerContext，
+                     返回 PipelineStep 或 list[PipelineStep]。
+            state_factory: 每次触发时创建新 State 的工厂函数。
+                          None 时使用默认 State()。
+            pipeline_name: pipeline 记录名，None 时自动生成。
+        """
+        from harness._internal.service import ServiceDef, ServiceRunner
+
+        if self._service_runner is None:
+            self._service_runner = ServiceRunner(self)
+
+        self._service_runner.register(ServiceDef(
+            name=name,
+            triggers=triggers,
+            handler=handler,
+            state_factory=state_factory,
+            pipeline_name=pipeline_name,
+        ))
+
+    async def emit(self, event: str, data: Any = None) -> None:
+        """发射事件，触发已注册的 EventTrigger。
+
+        Args:
+            event: 事件名。
+            data: 事件数据，传给 TriggerContext.event_data。
+        """
+        if self._service_runner is not None:
+            await self._service_runner.emit(event, data)
+
     def schedule(
         self,
         tasks: list[PipelineStep],
@@ -536,13 +808,25 @@ class Harness:
         self._scheduler.add_job(_run, cron)
 
     async def start(self) -> None:
-        """启动调度器。"""
+        """启动调度器和服务。"""
         await self._ensure_initialized()
+
+        # service 的 CronTrigger 也需要 scheduler
+        if self._scheduler is None and self._service_runner is not None:
+            from harness.scheduler.apscheduler import APSchedulerBackend
+            self._scheduler = APSchedulerBackend()
+
+        # 注册 service triggers
+        if self._service_runner is not None and self._scheduler is not None:
+            await self._service_runner.start(self._scheduler)
+
         if self._scheduler is not None:
             await self._scheduler.start()
 
     async def stop(self) -> None:
-        """停止调度器。"""
+        """停止服务和调度器。"""
+        if self._service_runner is not None:
+            await self._service_runner.stop()
         if self._scheduler is not None:
             await self._scheduler.stop()
 

@@ -25,6 +25,10 @@ class StreamParser:
         self.tokens_used: int = 0
         self.session_id: str | None = None
 
+        # 兜底：追踪最后一个 assistant 消息的文本，
+        # 当 result 事件 text 为空时（如 Claude 使用工具后未产生纯文本 result）用作回退。
+        self._last_assistant_text: str | None = None
+
     def feed(self, line: str) -> None:
         """处理一行 JSON 输入。"""
         line = line.strip()
@@ -62,14 +66,20 @@ class StreamParser:
         if event_type == "assistant":
             message = event.get("message", {})
             content = message.get("content", [])
+            text_parts: list[str] = []
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
                     text = block.get("text", "")
-                    if text and self._stream_callback is not None:
-                        try:
-                            self._stream_callback(text)
-                        except Exception:
-                            pass
+                    if text:
+                        text_parts.append(text)
+                        if self._stream_callback is not None:
+                            try:
+                                self._stream_callback(text)
+                            except Exception:
+                                pass
+            # 记录最后一个 assistant 消息的完整文本（兜底用）
+            if text_parts:
+                self._last_assistant_text = "".join(text_parts)
 
         # system init event：提取 session_id
         if event_type == "system" and event.get("subtype") == "init":

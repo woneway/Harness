@@ -10,12 +10,13 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from harness.runners.base import AbstractRunner
+    from harness.state import State
     from harness.storage.base import StorageProtocol
-    from harness.task import Result
+    from harness.tasks import Result
 
 from harness._internal.exceptions import TaskFailedError
 from harness._internal.task_index import TaskIndex
-from harness.task import Dialogue, DialogueOutput, DialogueProgressEvent, DialogueTurn, TaskConfig
+from harness.tasks import Dialogue, DialogueOutput, DialogueProgressEvent, DialogueTurn, TaskConfig
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class DialogueContext:
     background: str                         # Dialogue.background
     history: list[DialogueTurn]             # 本次发言前的所有历史
     pipeline_results: list[Result]          # 上游 pipeline 结果
+    state: "State | None" = None            # v2: pipeline State 对象
 
     def last_from(self, role_name: str) -> str | None:
         """获取指定角色最近一次发言内容，无则返回 None。"""
@@ -56,6 +58,7 @@ async def _execute_turn(
     run_id: str,
     config: TaskConfig,
     env_overrides: "dict[str, str] | None" = None,
+    state: "State | None" = None,
 ) -> "tuple[DialogueTurn, int]":
     """执行单次角色发言，含超时与重试，更新 session，持久化，返回 (DialogueTurn, tokens)。
 
@@ -71,6 +74,7 @@ async def _execute_turn(
         background=dialogue.background,
         history=list(history),
         pipeline_results=list(pipeline_results),
+        state=state,
     )
 
     # prompt callable 异常：不重试，直接抛 TaskFailedError
@@ -102,6 +106,26 @@ async def _execute_turn(
         _cb = dialogue.role_stream_callback
         role_stream_cb = lambda chunk: _cb(role_name, chunk)  # noqa: E731
 
+    # 自动流式进度：当 progress_callback 设置但无 role_stream_callback 时，
+    # 将 runner 的流式文本转发为 "streaming" 进度事件，让用户看到执行过程。
+    effective_stream_cb = role_stream_cb
+    if effective_stream_cb is None and dialogue.progress_callback is not None:
+        _pcb = dialogue.progress_callback
+        _rname = role_name
+        _rot = round_or_turn
+
+        def _auto_stream_cb(chunk: str) -> None:
+            _pcb(
+                DialogueProgressEvent(
+                    event="streaming",
+                    round_or_turn=_rot,
+                    role_name=_rname,
+                    content=chunk,
+                )
+            )
+
+        effective_stream_cb = _auto_stream_cb
+
     while attempt <= config.max_retries:
         # 进度回调：每次（含重试）发言开始
         if dialogue.progress_callback:
@@ -115,7 +139,7 @@ async def _execute_turn(
                     prompt_text,
                     system_prompt=merged_system,
                     session_id=role_sessions[role_name],
-                    stream_callback=role_stream_cb,
+                    stream_callback=effective_stream_cb,
                     env_overrides=env_overrides,
                 ),
                 timeout=config.timeout,
@@ -185,6 +209,7 @@ async def execute_dialogue(
     harness_config: "TaskConfig | None",
     storage: "StorageProtocol | None" = None,
     env_overrides: "dict[str, str] | None" = None,
+    state: "State | None" = None,
 ) -> "Result":
     """执行 Dialogue，支持轮次模式和回合模式。
 
@@ -194,7 +219,7 @@ async def execute_dialogue(
     回合模式（next_speaker 已设置）：
         next_speaker(history) 决定每次谁发言，until 在每次发言后检查。
     """
-    from harness.task import Result
+    from harness.tasks import Result
 
     config = dialogue.config or harness_config or TaskConfig()
     start_time = time.monotonic()
@@ -213,7 +238,7 @@ async def execute_dialogue(
                     role.name, task_index, round_num,
                     dialogue, history, pipeline_results,
                     role_sessions, harness_system_prompt, harness_runner,
-                    storage, run_id, config, env_overrides,
+                    storage, run_id, config, env_overrides, state=state,
                 )
                 history.append(turn)
                 total_tokens += turn_tokens
@@ -226,6 +251,7 @@ async def execute_dialogue(
                         background=dialogue.background,
                         history=list(history),
                         pipeline_results=list(pipeline_results),
+                        state=state,
                     )
                     if dialogue.until(check_ctx):
                         done = True
@@ -243,6 +269,7 @@ async def execute_dialogue(
                     background=dialogue.background,
                     history=list(history),
                     pipeline_results=list(pipeline_results),
+                    state=state,
                 )
                 if dialogue.until_round(round_ctx):
                     break
@@ -266,7 +293,7 @@ async def execute_dialogue(
                 next_role_name, task_index, turn_num,
                 dialogue, history, pipeline_results,
                 role_sessions, harness_system_prompt, harness_runner,
-                storage, run_id, config, env_overrides,
+                storage, run_id, config, env_overrides, state=state,
             )
             history.append(turn)
             total_tokens += turn_tokens
@@ -280,6 +307,7 @@ async def execute_dialogue(
                     background=dialogue.background,
                     history=list(history),
                     pipeline_results=list(pipeline_results),
+                    state=state,
                 )
                 if dialogue.until(check_ctx):
                     break

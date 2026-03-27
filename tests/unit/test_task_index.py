@@ -150,3 +150,61 @@ class TestTaskIndexImmutability:
         idx = TaskIndex.sequential(0)
         with pytest.raises((AttributeError, TypeError)):
             idx.outer = 1  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# v2 新增：Condition / Loop 索引类型
+# ---------------------------------------------------------------------------
+
+
+class TestConditionIndex:
+    def test_cond_true_str(self) -> None:
+        assert str(TaskIndex.cond_true(3, 0)) == "3.c0"
+        assert str(TaskIndex.cond_true(3, 1)) == "3.c1"
+
+    def test_cond_false_str(self) -> None:
+        assert str(TaskIndex.cond_false(3, 0)) == "3.f0"
+
+    def test_parse_cond_true(self) -> None:
+        idx = TaskIndex.parse("3.c0")
+        assert idx.kind == "cond_true"
+        assert idx.outer == 3
+        assert idx.sub == 0
+        assert idx.is_child
+
+    def test_parse_cond_false(self) -> None:
+        idx = TaskIndex.parse("3.f0")
+        assert idx.kind == "cond_false"
+        assert idx.outer == 3
+        assert idx.sub == 0
+        assert idx.is_child
+
+    def test_cond_outer_key(self) -> None:
+        assert TaskIndex.cond_true(5, 0).outer_key == "5"
+        assert TaskIndex.cond_false(5, 0).outer_key == "5"
+
+
+class TestLoopIndex:
+    def test_loop_iter_str(self) -> None:
+        assert str(TaskIndex.loop_iter(4, 2, 1)) == "4.i2.1"
+        assert str(TaskIndex.loop_iter(0, 0, 0)) == "0.i0.0"
+
+    def test_parse_loop_iter(self) -> None:
+        idx = TaskIndex.parse("4.i2.1")
+        assert idx.kind == "loop_iter"
+        assert idx.outer == 4
+        assert idx.iter_ == 2
+        assert idx.sub == 1
+        assert idx.is_child
+
+    def test_loop_outer_key(self) -> None:
+        assert TaskIndex.loop_iter(4, 2, 1).outer_key == "4"
+
+
+class TestNewIndexRoundtrip:
+    @pytest.mark.parametrize("s", [
+        "3.c0", "3.c1", "3.f0", "3.f2",
+        "4.i0.0", "4.i2.1", "0.i0.0",
+    ])
+    def test_roundtrip(self, s: str) -> None:
+        assert str(TaskIndex.parse(s)) == s
