@@ -1085,3 +1085,97 @@ class TestMergeSystemPrompt:
         sp = _merge_system_prompt(agent, "")
         assert "JSON" not in sp
         assert "response" not in sp
+
+
+class TestCallableTopic:
+    """Discussion.topic 支持 callable 测试（Issue #8）。"""
+
+    @pytest.mark.asyncio
+    async def test_callable_topic(self) -> None:
+        """topic 为 callable 时正确解析。"""
+        runner = MockRunner(
+            responses=["分析 MyProject"],
+            extraction_responses=[_pos_json({"choice": "A"})],
+        )
+        a1 = _make_agent("a", runner)
+
+        class MyState(State):
+            project_name: str = "MyProject"
+
+        s = MyState()
+        disc = Discussion(
+            agents=[a1],
+            position_schema=SimplePosition,
+            topic=lambda state: f"评估 {state.project_name}",
+            max_rounds=1,
+        )
+
+        result = await execute_discussion(
+            disc, 0, [], "run-1",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=TaskConfig(),
+            state=s,
+        )
+
+        output = result.output
+        assert isinstance(output, DiscussionOutput)
+        assert output.total_turns == 1
+        # 验证 prompt 中包含解析后的 topic
+        prompt_text = runner.calls[0]["prompt"]
+        assert "评估 MyProject" in prompt_text
+
+    @pytest.mark.asyncio
+    async def test_str_topic_still_works(self) -> None:
+        """topic 为 str 时行为不变。"""
+        runner = MockRunner(
+            responses=["ok"],
+            extraction_responses=[_pos_json({"choice": "B"})],
+        )
+        a1 = _make_agent("a", runner)
+
+        disc = Discussion(
+            agents=[a1],
+            position_schema=SimplePosition,
+            topic="静态话题",
+            max_rounds=1,
+        )
+
+        result = await execute_discussion(
+            disc, 0, [], "run-1",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=TaskConfig(),
+        )
+
+        prompt_text = runner.calls[0]["prompt"]
+        assert "静态话题" in prompt_text
+
+    @pytest.mark.asyncio
+    async def test_callable_topic_no_state(self) -> None:
+        """state=None 时 callable topic 解析为空字符串。"""
+        runner = MockRunner(
+            responses=["ok"],
+            extraction_responses=[_pos_json({"choice": "C"})],
+        )
+        a1 = _make_agent("a", runner)
+
+        disc = Discussion(
+            agents=[a1],
+            position_schema=SimplePosition,
+            topic=lambda state: f"项目: {state.name}",
+            max_rounds=1,
+        )
+
+        result = await execute_discussion(
+            disc, 0, [], "run-1",
+            harness_system_prompt="",
+            harness_runner=runner,
+            harness_config=TaskConfig(),
+            state=None,
+        )
+
+        assert result.output.total_turns == 1
+        # 验证 callable topic 在 state=None 时不被调用，prompt 中不含动态内容
+        prompt_text = runner.calls[0]["prompt"]
+        assert "项目:" not in prompt_text

@@ -18,6 +18,10 @@ from harness import State
 _GITHUB_URL_RE = re.compile(
     r"https?://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/\s]+)"
 )
+# owner/repo 格式（如 "cft0808/edict" 或 "langchain-ai/langchain"）
+_OWNER_REPO_RE = re.compile(
+    r"(?:^|\s)(?P<owner>[A-Za-z0-9._-]+)/(?P<repo>[A-Za-z0-9._-]+)(?:\s|$)"
+)
 _VS_RE = re.compile(r"\bvs\.?\b", re.IGNORECASE)
 
 
@@ -46,13 +50,27 @@ def parse_input(state: State) -> str:
         }
         return json.dumps(result, ensure_ascii=False)
 
-    # 情况 2: 包含 GitHub URL → project 模式
+    # 情况 2a: 包含 GitHub URL → project 模式
     m = _GITHUB_URL_RE.search(raw)
     if m:
         owner, repo = m.group("owner"), m.group("repo")
         state.input_type = "project"
         state.target_project = repo
         state.target_url = f"https://github.com/{owner}/{repo}"
+        result = {
+            "input_type": "project",
+            "target": repo,
+            "url": state.target_url,
+        }
+        return json.dumps(result, ensure_ascii=False)
+
+    # 情况 2b: 包含 owner/repo 格式 → project 模式
+    m = _OWNER_REPO_RE.search(raw)
+    if m:
+        owner, repo = m.group("owner"), m.group("repo")
+        state.input_type = "project"
+        state.target_project = repo
+        state.target_url = f"{owner}/{repo}"
         result = {
             "input_type": "project",
             "target": repo,

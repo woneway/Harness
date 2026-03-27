@@ -17,7 +17,6 @@ class ResearchState(State):
 
     # 采集数据
     github_metrics: dict = {}              # {project_name: {stars, forks, ...}}
-    qualitative_info: str = ""             # 定性分析文本
 
     # Discussion 结果
     discussion: DiscussionOutput | None = None

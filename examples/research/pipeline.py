@@ -4,26 +4,44 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import date
 from pathlib import Path
 
 from harness import (
     Condition,
     Discussion,
+    DiscussionOutput,
     FunctionTask,
     LLMTask,
-    Parallel,
 )
 from harness.runners.base import AbstractRunner
 from harness.tasks.discussion import all_agree_on
-
-logger = logging.getLogger(__name__)
 
 from .agents import create_agents
 from .schemas.position import ProjectEvaluation
 from .state import ResearchState
 from .tasks.collect_github import collect_github
 from .tasks.parse_input import parse_input
+
+logger = logging.getLogger(__name__)
+
+
+def _create_extraction_runner() -> AbstractRunner | None:
+    """尝试创建便宜的 Haiku runner 用于 Discussion Phase 2 立场提取。
+
+    如果 ANTHROPIC_API_KEY 未设置则返回 None，复用默认 runner。
+    """
+    try:
+        from harness.runners.anthropic import AnthropicRunner
+    except ImportError:
+        logger.warning("AnthropicRunner 不可用（缺少依赖），Discussion Phase 2 将使用默认 runner")
+        return None
+    try:
+        return AnthropicRunner(model="claude-haiku-4-5-20251001")
+    except ValueError:
+        logger.info("ANTHROPIC_API_KEY 未设置，Discussion Phase 2 将使用默认 runner")
+        return None
 
 # SecondBrain 输出路径
 SECONDBRAIN_DIR = Path.home() / "ai" / "SecondBrain"
@@ -34,11 +52,12 @@ def _stream_print(text: str) -> None:
     print(text, end="", flush=True)
 
 
-def _step_banner(label: str) -> None:
+def _step_banner(label: str) -> str:
     """打印步骤分隔栏。"""
     print(f"\n{'─' * 50}")
     print(f"  ▶ {label}")
     print(f"{'─' * 50}\n")
+    return ""
 
 
 def _progress_handler(e) -> None:
@@ -56,24 +75,54 @@ def _progress_handler(e) -> None:
 
 def _strip_markdown_fences(text: str) -> str:
     """剥离 markdown 代码块包裹（```json ... ``` 或 ``` ... ```）。"""
-    import re
     return re.sub(r"^```\w*\n?|```\s*$", "", text.strip()).strip()
+
+
+def _recover_partial_json_array(text: str) -> list[dict]:
+    """从截断的 JSON 数组中恢复完整的对象。
+
+    当 LLM 输出被截断时（如 token 限制），使用 json.JSONDecoder.raw_decode
+    逐个提取完整的 JSON 对象（支持嵌套结构）。
+    """
+    recovered: list[dict] = []
+    decoder = json.JSONDecoder()
+    idx = 0
+    while idx < len(text):
+        try:
+            obj, end = decoder.raw_decode(text, idx)
+            if isinstance(obj, dict) and "name" in obj:
+                recovered.append(obj)
+            idx = end
+        except json.JSONDecodeError:
+            idx += 1
+    return recovered
 
 
 def _parse_competitors_json(state: ResearchState) -> list[dict]:
     """将 LLMTask 返回的 JSON 字符串解析为 list[dict]，写入 state.competitors。
 
+    三级容错：直接解析 → 剥离 markdown → 提取完整对象（截断恢复）。
     同时回填 target_url：从 competitors 中找到与 target_project 匹配的项目 URL。
     """
     raw = state.competitors
     if isinstance(raw, str):
         cleaned = _strip_markdown_fences(raw)
+        # Level 1: 直接解析
         try:
             parsed = json.loads(cleaned)
             state.competitors = parsed if isinstance(parsed, list) else []
         except json.JSONDecodeError:
-            logger.warning("Failed to parse competitors JSON: %s", cleaned[:200])
-            state.competitors = []
+            # Level 2: 截断恢复 — 提取所有完整的 JSON 对象
+            recovered = _recover_partial_json_array(cleaned)
+            if recovered:
+                logger.warning(
+                    "JSON 被截断，恢复了 %d 个完整对象（原文 %d 字符）",
+                    len(recovered), len(cleaned),
+                )
+                state.competitors = recovered
+            else:
+                logger.warning("Failed to parse competitors JSON: %s", cleaned[:200])
+                state.competitors = []
 
     # 回填 target_url：从 competitors 中匹配 target_project
     if state.target_project and not state.target_url:
@@ -95,8 +144,6 @@ def _parse_competitors_json(state: ResearchState) -> list[dict]:
 
 def _save_report(state: ResearchState) -> str:
     """将报告写入 SecondBrain 知识库。"""
-    import re
-
     if state.target_project:
         name = state.target_project
     else:
@@ -135,11 +182,39 @@ def _format_metrics(metrics: dict) -> str:
     return "\n\n".join(lines)
 
 
+def _format_competitors(competitors: list[dict]) -> str:
+    """格式化竞品列表。"""
+    if not competitors:
+        return "暂无"
+    return "\n".join(
+        f"- {c.get('name', '?')}: {c.get('url', '')} — {c.get('description', '')}"
+        for c in competitors if isinstance(c, dict)
+    )
+
+
+def _format_discussion_insights(discussion: DiscussionOutput | None) -> str:
+    """从 Discussion 历史中提取各 Agent 最终轮分析摘要。"""
+    if not discussion or not discussion.turns:
+        return "无讨论数据"
+    last_round = max(t.round for t in discussion.turns)
+    lines = []
+    for turn in discussion.turns:
+        if turn.round == last_round:
+            snippet = turn.response[:800]
+            if len(turn.response) > 800:
+                # 在最后一个句号处截断，避免切断句子
+                cut = snippet.rsplit("。", 1)
+                snippet = cut[0] + "…" if len(cut) > 1 else snippet + "…"
+            lines.append(f"### {turn.agent_name}\n{snippet}")
+    return "\n\n".join(lines)
+
+
 def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
     """构建调研 pipeline，返回 (steps, state)。"""
     tech_analyst, community_assessor, architect = create_agents(runner)
     state = ResearchState()
     today = date.today().isoformat()
+    extraction_runner = _create_extraction_runner()
 
     def _parse_with_banner(state: ResearchState) -> str:
         _step_banner("Step 0: 解析输入")
@@ -167,7 +242,7 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
         Condition(
             check=lambda state: state.input_type in ("topic", "project") and not state.competitors,
             if_true=[
-                FunctionTask(fn=lambda state: _step_banner("Step 1: 搜索同类项目") or ""),
+                FunctionTask(fn=lambda state: _step_banner("Step 1: 搜索同类项目")),
                 LLMTask(
                     prompt=lambda state: (
                         f"我需要调研{'主题: ' + state.raw_input if state.input_type == 'topic' else '项目: ' + state.target_project}。\n\n"
@@ -187,48 +262,32 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
             ],
         ),
 
-        # Step 2: 并行采集数据
-        Parallel([
-            # 2.0: GitHub 定量指标
-            FunctionTask(fn=_collect_with_banner),  # mutates state.github_metrics
-            # 2.1: 定性信息（由 Claude 搜索和分析）
-            LLMTask(
-                prompt=lambda state: (
-                    f"请对以下开源项目进行详细的定性调研：\n\n"
-                    f"主项目：{state.target_project}\n"
-                    f"对比项目：{', '.join(c.get('name', '') for c in state.competitors if isinstance(c, dict)) if state.competitors else '无'}\n\n"
-                    f"对每个项目，请通过搜索和阅读官方文档/README，分析：\n"
-                    f"1. 核心功能和设计理念\n"
-                    f"2. 技术架构和关键抽象\n"
-                    f"3. 文档质量和入门体验\n"
-                    f"4. 社区评价和常见反馈\n"
-                    f"5. 典型使用场景\n\n"
-                    f"请详细输出每个项目的分析。"
-                ),
-                output_key="qualitative_info",
-                stream_callback=_stream_print,
-            ),
-        ]),
+        # Step 2: 采集 GitHub 定量指标
+        FunctionTask(fn=_collect_with_banner),
 
         # Step 3: 三 Agent 结构化讨论
-        FunctionTask(fn=lambda state: _step_banner("Step 3: 多 Agent 讨论") or ""),
+        # （agents 自带 Claude CLI 工具链，可自行搜索和分析项目，无需预先采集定性数据）
+        FunctionTask(fn=lambda state: _step_banner("Step 3: 多 Agent 讨论")),
         Discussion(
             agents=[tech_analyst, community_assessor, architect],
             position_schema=ProjectEvaluation,
-            topic="评估对比开源项目及其同类竞品",
+            topic=lambda state: (
+                f"评估 {state.target_project or state.raw_input} 及其同类竞品"
+            ),
             background=lambda state: (
                 f"## 调研目标\n{state.raw_input}\n\n"
-                f"## GitHub 指标\n{_format_metrics(state.github_metrics)}\n\n"
-                f"## 定性分析\n{state.qualitative_info[:3000]}"
+                f"## 竞品\n{_format_competitors(state.competitors)}\n\n"
+                f"## GitHub 指标\n{_format_metrics(state.github_metrics)}"
             ),
-            max_rounds=3,
+            max_rounds=2,
             convergence=all_agree_on("recommendation"),
+            extraction_runner=extraction_runner,
             progress_callback=_progress_handler,
             output_key="discussion",
         ),
 
         # Step 4: 生成最终报告
-        FunctionTask(fn=lambda state: _step_banner("Step 4: 生成报告") or ""),
+        FunctionTask(fn=lambda state: _step_banner("Step 4: 生成报告")),
         LLMTask(
             prompt=lambda state: (
                 f"基于以下调研数据和多 Agent 讨论结果，生成一份完整的 Markdown 调研报告。\n\n"
@@ -249,7 +308,7 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
                 f"---\n"
                 f"```\n\n"
                 f"## GitHub 指标数据\n{_format_metrics(state.github_metrics)}\n\n"
-                f"## 定性分析\n{state.qualitative_info[:2000]}\n\n"
+                f"## Agent 分析\n{_format_discussion_insights(state.discussion)}\n\n"
                 f"## Discussion 结果\n"
                 f"收敛: {state.discussion.converged if state.discussion else 'N/A'}\n"
                 f"轮数: {state.discussion.rounds_completed if state.discussion else 'N/A'}\n\n"

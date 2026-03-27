@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -121,7 +122,9 @@ async def execute_llm_task(
     try:
         if callable(task.prompt):
             if state is not None:
-                base_prompt_text = call_with_compat(task.prompt, state)
+                base_prompt_text = call_with_compat(
+                    task.prompt, state, in_state_pipeline=True,
+                )
             else:
                 base_prompt_text = task.prompt(results)
         else:
@@ -258,9 +261,14 @@ async def execute_function_task(
             while attempt <= config.max_retries:
                 try:
                     if state is not None:
-                        raw_output = call_with_compat(task.fn, state)
+                        raw_output = call_with_compat(
+                            task.fn, state, in_state_pipeline=True,
+                        )
                     else:
                         raw_output = task.fn(results)
+                    # 支持 async 函数：自动 await coroutine
+                    if inspect.isawaitable(raw_output):
+                        raw_output = await raw_output
                 except OutputSchemaError:
                     raise  # 直接向上抛，不重试
                 except Exception as e:
@@ -319,7 +327,9 @@ async def execute_shell_task(
     try:
         if callable(task.cmd):
             if state is not None:
-                cmd_text = call_with_compat(task.cmd, state)
+                cmd_text = call_with_compat(
+                    task.cmd, state, in_state_pipeline=True,
+                )
             else:
                 cmd_text = task.cmd(results)
         else:

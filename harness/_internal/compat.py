@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import typing
 from typing import Any, Callable, Literal
 
 from harness.state import State
 from harness.tasks.result import Result
+
+logger = logging.getLogger(__name__)
 
 
 def detect_callable_mode(fn: Callable) -> Literal["state", "results"]:
@@ -55,9 +58,25 @@ def detect_callable_mode(fn: Callable) -> Literal["state", "results"]:
     return "results"
 
 
-def call_with_compat(fn: Callable, state: State) -> Any:
-    """根据检测结果调用 callable，传 state 或 state._results。"""
+def call_with_compat(
+    fn: Callable, state: State, *, in_state_pipeline: bool = False,
+) -> Any:
+    """根据检测结果调用 callable，传 state 或 state._results。
+
+    Args:
+        fn: 要调用的 callable。
+        state: 当前 State 对象。
+        in_state_pipeline: 是否在 State 模式 pipeline 中。
+            为 True 且检测为 v1 模式时会输出 warning。
+    """
     mode = detect_callable_mode(fn)
     if mode == "state":
         return fn(state)
+    if in_state_pipeline:
+        logger.warning(
+            "callable 参数名不是 'state'，将以 v1 模式调用（传入 state._results 而非 state）。"
+            "如在 state pipeline 中使用，请将参数名改为 'state' 或添加 State 类型注解。"
+            " callable: %r",
+            fn,
+        )
     return fn(state._results)

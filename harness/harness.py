@@ -199,6 +199,8 @@ class Harness:
         name: str | None = None,
         resume_from: str | None = None,
         state: State | None = None,
+        on_step_start: Callable[[PipelineStep, str], None] | None = None,
+        on_step_complete: Callable[[PipelineStep, str, Result | list[Result]], None] | None = None,
     ) -> PipelineResult:
         """执行多步流水线。
 
@@ -207,6 +209,8 @@ class Harness:
             name: 可选名称，存入 runs 表。
             resume_from: 从指定 run_id 续跑，跳过已成功的步骤。
             state: v2 State 对象；None 时自动创建默认 State。
+            on_step_start: 步骤开始时的回调，接收 (step, task_index)。
+            on_step_complete: 步骤完成时的回调，接收 (step, task_index, result)。
 
         Returns:
             PipelineResult 包含所有步骤结果。
@@ -342,6 +346,13 @@ class Harness:
 
                 step_result: Result | list[Result]
 
+                # 生命周期回调：步骤开始
+                if on_step_start is not None:
+                    try:
+                        on_step_start(task, task_index)
+                    except Exception as e:
+                        logger.warning("on_step_start callback raised: %s", e)
+
                 if isinstance(task, Parallel):
                     sub_results = await execute_parallel(
                         task,
@@ -396,6 +407,12 @@ class Harness:
                         )
                         if sub_output_key and r.success:
                             state._set_output(sub_output_key, r.output)
+                    # 生命周期回调：步骤完成
+                    if on_step_complete is not None:
+                        try:
+                            on_step_complete(task, task_index, sub_results)
+                        except Exception as e:
+                            logger.warning("on_step_complete callback raised: %s", e)
                     continue
 
                 # 解析有效回调（Task 级覆写 Harness 级）
@@ -525,6 +542,12 @@ class Harness:
                         total_tokens += r.tokens_used
                         results.append(r)
                         state._append_result(r)
+                    # 生命周期回调：步骤完成
+                    if on_step_complete is not None:
+                        try:
+                            on_step_complete(task, task_index, sub_results)
+                        except Exception as e:
+                            logger.warning("on_step_complete callback raised: %s", e)
                     continue
 
                 elif isinstance(task, Loop):
@@ -553,6 +576,12 @@ class Harness:
                         total_tokens += r.tokens_used
                         results.append(r)
                         state._append_result(r)
+                    # 生命周期回调：步骤完成
+                    if on_step_complete is not None:
+                        try:
+                            on_step_complete(task, task_index, sub_results)
+                        except Exception as e:
+                            logger.warning("on_step_complete callback raised: %s", e)
                     continue
 
                 else:
@@ -578,6 +607,13 @@ class Harness:
                 output_key = getattr(task, "output_key", None)
                 if output_key and r.success:
                     state._set_output(output_key, r.output)
+
+                # 生命周期回调：步骤完成
+                if on_step_complete is not None:
+                    try:
+                        on_step_complete(task, task_index, r)
+                    except Exception as e:
+                        logger.warning("on_step_complete callback raised: %s", e)
 
         except TaskFailedError as e:
             # 写失败状态
