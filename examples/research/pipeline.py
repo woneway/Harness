@@ -61,7 +61,10 @@ def _strip_markdown_fences(text: str) -> str:
 
 
 def _parse_competitors_json(state: ResearchState) -> list[dict]:
-    """将 LLMTask 返回的 JSON 字符串解析为 list[dict]，写入 state.competitors。"""
+    """将 LLMTask 返回的 JSON 字符串解析为 list[dict]，写入 state.competitors。
+
+    同时回填 target_url：从 competitors 中找到与 target_project 匹配的项目 URL。
+    """
     raw = state.competitors
     if isinstance(raw, str):
         cleaned = _strip_markdown_fences(raw)
@@ -71,13 +74,38 @@ def _parse_competitors_json(state: ResearchState) -> list[dict]:
         except json.JSONDecodeError:
             logger.warning("Failed to parse competitors JSON: %s", cleaned[:200])
             state.competitors = []
+
+    # 回填 target_url：从 competitors 中匹配 target_project
+    if state.target_project and not state.target_url:
+        target_lower = state.target_project.lower()
+        for comp in state.competitors:
+            if not isinstance(comp, dict):
+                continue
+            comp_name = comp.get("name", "").lower()
+            comp_url = comp.get("url", "")
+            if target_lower in comp_name or comp_name in target_lower:
+                state.target_url = comp_url
+                break
+
+    if not state.competitors:
+        logger.warning("No competitors found after parsing — downstream steps may have limited data")
+
     return state.competitors
 
 
 def _save_report(state: ResearchState) -> str:
     """将报告写入 SecondBrain 知识库。"""
-    name = state.target_project or "research"
-    filename = f"{name.lower().replace(' ', '-')}-research.md"
+    import re
+
+    if state.target_project:
+        name = state.target_project
+    else:
+        # topic 模式：从 raw_input 生成简短文件名
+        name = state.raw_input[:40]
+    # 清理文件名：只保留字母数字和连字符
+    name = re.sub(r"[^\w\s-]", "", name).strip()
+    name = re.sub(r"[\s_]+", "-", name).lower()
+    filename = f"{name or 'research'}-research.md"
     output_path = SECONDBRAIN_DIR / filename
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

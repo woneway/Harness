@@ -42,10 +42,20 @@ def _fetch_repo_metrics(owner_repo: str) -> dict:
 
 
 def _extract_owner_repo(project_name: str, url: str) -> str | None:
-    """从项目名或 URL 提取 owner/repo。"""
-    if url and "github.com/" in url:
+    """从 URL 提取 owner/repo。支持完整 URL 和 owner/repo 格式。"""
+    import re
+
+    if not url:
+        return None
+
+    # 完整 URL: https://github.com/owner/repo
+    if "github.com/" in url:
         return url.rstrip("/").split("github.com/")[1]
-    # 对于纯项目名，需要先搜索（由 LLMTask 处理）
+
+    # owner/repo 格式（如 "langchain-ai/langchain"）
+    if re.match(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$", url.strip()):
+        return url.strip()
+
     return None
 
 

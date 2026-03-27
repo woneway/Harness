@@ -11,15 +11,22 @@ from harness import Harness
 from harness.runners.base import AbstractRunner, RunnerResult
 from tests.conftest import make_mock_storage, patch_storage
 
-from examples.research.pipeline import build_pipeline
+from examples.research.pipeline import (
+    _parse_competitors_json,
+    _save_report,
+    _strip_markdown_fences,
+    build_pipeline,
+)
 from examples.research.schemas.position import ProjectEvaluation
 from examples.research.state import ResearchState
+from examples.research.tasks.collect_github import _extract_owner_repo
 from examples.research.tasks.parse_input import parse_input
 
 
 # ── Mock Runner ───────────────────────────────────────────────────────────
 
 _MOCK_COMPETITORS_JSON = json.dumps([
+    {"name": "edict", "url": "https://github.com/org/edict", "description": "Target project"},
     {"name": "project-a", "url": "https://github.com/org/project-a", "description": "A tool"},
     {"name": "project-b", "url": "https://github.com/org/project-b", "description": "B tool"},
 ])
@@ -125,6 +132,90 @@ class TestParseInput:
         data = json.loads(result)
         assert data["input_type"] == "topic"
         assert state.input_type == "topic"
+
+
+# ── _extract_owner_repo 单元测试 ──────────────────────────────────────────
+
+
+class TestExtractOwnerRepo:
+    def test_full_url(self):
+        assert _extract_owner_repo("x", "https://github.com/org/repo") == "org/repo"
+
+    def test_owner_repo_format(self):
+        assert _extract_owner_repo("x", "langchain-ai/langchain") == "langchain-ai/langchain"
+
+    def test_empty_url(self):
+        assert _extract_owner_repo("x", "") is None
+
+    def test_garbage(self):
+        assert _extract_owner_repo("x", "not a url at all") is None
+
+
+# ── _parse_competitors_json 单元测试 ─────────────────────────────────────
+
+
+def _set_competitors_raw(state: ResearchState, raw: str) -> None:
+    """模拟 _set_output 绕过 Pydantic 校验直接写入字符串。"""
+    state.__dict__["competitors"] = raw
+
+
+class TestParseCompetitorsJson:
+    def test_backfill_target_url(self):
+        state = ResearchState(target_project="edict")
+        _set_competitors_raw(state, json.dumps([
+            {"name": "edict", "url": "https://github.com/org/edict", "description": "..."},
+            {"name": "other", "url": "https://github.com/org/other", "description": "..."},
+        ]))
+        _parse_competitors_json(state)
+        assert state.target_url == "https://github.com/org/edict"
+        assert len(state.competitors) == 2
+
+    def test_markdown_fences(self):
+        state = ResearchState(target_project="foo")
+        _set_competitors_raw(
+            state, '```json\n[{"name": "foo", "url": "org/foo", "description": "x"}]\n```'
+        )
+        _parse_competitors_json(state)
+        assert len(state.competitors) == 1
+        assert state.target_url == "org/foo"
+
+    def test_invalid_json(self):
+        state = ResearchState(target_project="x")
+        _set_competitors_raw(state, "not json")
+        _parse_competitors_json(state)
+        assert state.competitors == []
+
+    def test_already_list(self):
+        comps = [{"name": "a", "url": "org/a", "description": ""}]
+        state = ResearchState(target_project="b", competitors=comps)
+        _parse_competitors_json(state)
+        assert state.competitors == comps
+
+
+# ── _save_report 文件名测试 ──────────────────────────────────────────────
+
+
+class TestSaveReport:
+    def test_project_filename(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("examples.research.pipeline.SECONDBRAIN_DIR", tmp_path)
+        state = ResearchState(target_project="crewai", report="# Report")
+        path = _save_report(state)
+        assert "crewai-research.md" in path
+        assert (tmp_path / "crewai-research.md").exists()
+
+    def test_topic_filename(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("examples.research.pipeline.SECONDBRAIN_DIR", tmp_path)
+        state = ResearchState(
+            target_project="",
+            raw_input="Python AI 编排框架",
+            report="# Report",
+        )
+        path = _save_report(state)
+        assert "research.md" in path
+        # 不应该是 "research-research.md" 或空文件名
+        assert "-research.md" in path
+        filename = path.split("/")[-1]
+        assert not filename.startswith("-")
 
 
 # ── Pipeline 集成测试 ─────────────────────────────────────────────────────
