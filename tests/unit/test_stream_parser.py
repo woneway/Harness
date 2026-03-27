@@ -103,3 +103,72 @@ class TestStreamParserCallbacks:
             parser.feed(json.dumps(event))
 
         assert received == ["A", "B", "C"]
+
+
+class TestStreamEventFormat:
+    """Claude CLI --verbose 模式下的 stream_event 格式。"""
+
+    def test_content_block_delta_text(self) -> None:
+        """content_block_delta.delta.text 触发 stream_callback。"""
+        received: list[str] = []
+        parser = StreamParser(stream_callback=received.append)
+
+        parser.feed('{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text","text":"AI "}}}')
+        parser.feed('{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text","text":"agent "}}}')
+
+        assert received == ["AI ", "agent "]
+
+    def test_multiple_indices(self) -> None:
+        """多 index 的 delta 分别触发回调。"""
+        received: list[str] = []
+        parser = StreamParser(stream_callback=received.append)
+
+        parser.feed('{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text","text":"第一句。"}}}')
+        parser.feed('{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text","text":"第二句。"}}}')
+
+        assert received == ["第一句。", "第二句。"]
+
+    def test_raw_callback_receives_stream_events(self) -> None:
+        """raw_stream_callback 也能收到 stream_event。"""
+        received: list[dict] = []
+        parser = StreamParser(raw_stream_callback=received.append)
+
+        parser.feed('{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text","text":"hi"}}}')
+
+        assert len(received) == 1
+        assert received[0]["type"] == "stream_event"
+
+    def test_message_start_sets_session(self) -> None:
+        """message_start event 含 session_id。"""
+        parser = StreamParser()
+        parser.feed('{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg-1","session":"sess-verbose-1"}}}')
+
+        assert parser.session_id == "sess-verbose-1"
+
+    def test_callback_exception_does_not_crash(self) -> None:
+        """stream_event 回调异常不中断解析。"""
+        def bad(text: str) -> None:
+            raise RuntimeError("boom")
+
+        parser = StreamParser(stream_callback=bad)
+        parser.feed('{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text","text":"x"}}}')
+        # 不应抛出
+
+    def test_non_text_delta_ignored(self) -> None:
+        """非 text 类型的 delta 不触发 stream_callback。"""
+        received: list[str] = []
+        parser = StreamParser(stream_callback=received.append)
+
+        parser.feed('{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{"}}}')
+
+        assert received == []
+
+    def test_mixed_formats(self) -> None:
+        """stream_event 和 assistant 格式混合出现。"""
+        received: list[str] = []
+        parser = StreamParser(stream_callback=received.append)
+
+        parser.feed('{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text","text":"A"}}}')
+        parser.feed(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "B"}]}}))
+
+        assert received == ["A", "B"]

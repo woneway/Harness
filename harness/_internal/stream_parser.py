@@ -62,6 +62,28 @@ class StreamParser:
                 self.session_id = session_id
             return
 
+        # stream_event 格式（Claude CLI --verbose 模式）
+        if event_type == "stream_event":
+            inner = event.get("event", {})
+            inner_type = inner.get("type")
+
+            if inner_type == "content_block_delta":
+                delta = inner.get("delta", {})
+                if delta.get("type") == "text":
+                    text = delta.get("text", "")
+                    if text and self._stream_callback is not None:
+                        try:
+                            self._stream_callback(text)
+                        except Exception:
+                            pass
+
+            elif inner_type == "message_start":
+                msg = inner.get("message", {})
+                if session_id := msg.get("session"):
+                    self.session_id = session_id
+
+            return
+
         # assistant message 中的文本片段（partial messages）
         if event_type == "assistant":
             message = event.get("message", {})
