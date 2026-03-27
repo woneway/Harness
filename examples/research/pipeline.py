@@ -54,15 +54,22 @@ def _progress_handler(e) -> None:
         print(f"\n  [{e.event}] {e.agent_name}{content_preview}", flush=True)
 
 
+def _strip_markdown_fences(text: str) -> str:
+    """剥离 markdown 代码块包裹（```json ... ``` 或 ``` ... ```）。"""
+    import re
+    return re.sub(r"^```\w*\n?|```\s*$", "", text.strip()).strip()
+
+
 def _parse_competitors_json(state: ResearchState) -> list[dict]:
     """将 LLMTask 返回的 JSON 字符串解析为 list[dict]，写入 state.competitors。"""
     raw = state.competitors
     if isinstance(raw, str):
+        cleaned = _strip_markdown_fences(raw)
         try:
-            parsed = json.loads(raw)
+            parsed = json.loads(cleaned)
             state.competitors = parsed if isinstance(parsed, list) else []
         except json.JSONDecodeError:
-            logger.warning("Failed to parse competitors JSON: %s", raw[:200])
+            logger.warning("Failed to parse competitors JSON: %s", cleaned[:200])
             state.competitors = []
     return state.competitors
 
