@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import types
 from typing import Any, Union, get_args, get_origin
 
@@ -96,8 +97,11 @@ class State(BaseModel):
         target = origin if origin is not None else ann
 
         if target in (list, dict):
+            text = value
+            # 先剥离 markdown code fences（如 ```json ... ```）
+            text = re.sub(r"```\w*\n?|```\s*$", "", text, flags=re.DOTALL).strip()
             try:
-                parsed = json.loads(value)
+                parsed = json.loads(text)
                 if isinstance(parsed, (list, dict)):
                     return parsed
             except (json.JSONDecodeError, TypeError):

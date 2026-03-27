@@ -63,7 +63,7 @@ class DiscussionOutput:
 class DiscussionProgressEvent:
     """Discussion progress_callback 接收的结构化事件。"""
 
-    event: Literal["start", "complete", "error", "streaming"]
+    event: Literal["start", "complete", "error", "streaming", "tool", "raw"]
     round: int
     agent_name: str
     content: str | None = None

@@ -63,21 +63,34 @@ def _step_banner(label: str) -> str:
 def _progress_handler(e) -> None:
     """Discussion 进度回调。"""
     if e.event == "streaming":
-        print(e.content or "", end="", flush=True)
+        # streaming 输出实时显示，带 agent 名前缀
+        print(f"  [{e.agent_name}] {e.content or ''}", end="", flush=True)
+    elif e.event == "tool":
+        # 工具调用：已由 executor 格式化为可读描述
+        print(f"\n  [{e.agent_name}] 🔧 {e.content}", flush=True)
     elif e.event == "phase":
-        print(f"\n  [{e.agent_name}] {e.content}", flush=True)
+        print(f"\n  [{e.agent_name}] 📋 {e.content}", flush=True)
     elif e.event == "start":
-        print(f"\n  [{e.event}] {e.agent_name}", flush=True)
+        print(f"\n  ⏳ [{e.agent_name}] 开始发言...", flush=True)
     elif e.event == "complete":
-        print(f"\n  [{e.event}] {e.agent_name}", flush=True)
+        print(f"\n  ✅ [{e.agent_name}] 发言完成", flush=True)
     elif e.event == "error":
         content_preview = f": {e.content[:80]}" if e.content else ""
-        print(f"\n  [{e.event}] {e.agent_name}{content_preview}", flush=True)
+        print(f"\n  ❌ [{e.agent_name}] {content_preview}", flush=True)
 
 
 def _strip_markdown_fences(text: str) -> str:
-    """剥离 markdown 代码块包裹（```json ... ``` 或 ``` ... ```）。"""
-    return re.sub(r"^```\w*\n?|```\s*$", "", text.strip()).strip()
+    """剥离 markdown 代码块包裹，并处理 JSON 前的非 JSON 前缀说明文字。
+
+    LLM 可能输出：
+        "edict 这个名称对应... \n```json\n[...]\n```\n    先去 fence，再从第一个 `[` 或 `{` 开始截取。
+    """
+    stripped = re.sub(r"^```\w*\n?|```\s*$", "", text.strip())
+    # 从第一个 [ 或 { 开始截取（处理 LLM 前缀说明文字）
+    match = re.search(r"[\[{]", stripped)
+    if match:
+        stripped = stripped[match.start():]
+    return stripped.strip()
 
 
 def _recover_partial_json_array(text: str) -> list[dict]:
@@ -195,19 +208,62 @@ def _format_competitors(competitors: list[dict]) -> str:
 
 
 def _format_discussion_insights(discussion: DiscussionOutput | None) -> str:
-    """从 Discussion 历史中提取各 Agent 最终轮分析摘要。"""
-    if not discussion or not discussion.turns:
+    """整合结构化立场和定性分析，按 Agent 分组输出。
+
+    每个 Agent 的输出包含：
+    1. 结构化立场（评分、推荐理由、优劣势、最佳场景）
+    2. 最终轮文字分析（定性补充）
+    """
+    if not discussion or not discussion.final_positions:
         return "无讨论数据"
-    last_round = max(t.round for t in discussion.turns)
+
     lines = []
-    for turn in discussion.turns:
-        if turn.round == last_round:
-            snippet = turn.response[:800]
-            if len(turn.response) > 800:
-                # 在最后一个句号处截断，避免切断句子
+
+    for agent_name, pos in discussion.final_positions.items():
+        # 1. 结构化立场（BaseModel → dict）
+        if hasattr(pos, "model_dump"):
+            pos_dict = pos.model_dump()
+        elif hasattr(pos, "dict"):
+            pos_dict = pos.dict()  # noqa: PTH208
+        else:
+            pos_dict = dict(pos) if isinstance(pos, dict) else {}
+
+        pos_lines = [
+            f"### {agent_name}",
+            f"**评分**: {pos_dict.get('score', '?')}/10 | **{pos_dict.get('recommendation', '?')}**",
+            f"**推荐理由**: {pos_dict.get('project_name', '')}",
+        ]
+        strengths = pos_dict.get("strengths", [])
+        if strengths:
+            pos_lines.append(f"**优势**: {', '.join(strengths)}")
+        weaknesses = pos_dict.get("weaknesses", [])
+        if weaknesses:
+            pos_lines.append(f"**劣势**: {', '.join(weaknesses)}")
+        best_for = pos_dict.get("best_for", "")
+        if best_for:
+            pos_lines.append(f"**最佳场景**: {best_for}")
+
+        lines.append("\n".join(pos_lines))
+
+        # 2. 定性分析补充：从 turns 中找该 Agent 最后轮的文字
+        agent_turns = [t for t in discussion.turns if t.agent_name == agent_name]
+        if agent_turns:
+            last_turn = max(agent_turns, key=lambda t: t.round)
+            snippet = last_turn.response[:600]
+            if len(last_turn.response) > 600:
                 cut = snippet.rsplit("。", 1)
-                snippet = cut[0] + "…" if len(cut) > 1 else snippet + "…"
-            lines.append(f"### {turn.agent_name}\n{snippet}")
+                snippet = (cut[0] + "…" if len(cut) > 1 else snippet + "…")
+            lines.append(f"\n*分析摘要*: {snippet}\n")
+
+    if not lines:
+        return "无讨论数据"
+
+    # 收敛状态
+    if discussion.converged:
+        lines.append(f"\n**讨论结论**: 收敛于第 {discussion.convergence_round or ''} 轮，各方达成共识。")
+    else:
+        lines.append(f"\n**讨论结论**: 经 {discussion.rounds_completed} 轮讨论，尚未收敛，请参考各方立场自行判断。")
+
     return "\n\n".join(lines)
 
 
@@ -297,7 +353,8 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
                 f"1. 报告必须以 YAML front matter 开头（见下方格式）\n"
                 f"2. 包含 6 个标准章节：项目概览、核心功能、社区活跃度、同类项目对比、优劣势分析、适用场景推荐\n"
                 f"3. 使用表格展示对比数据\n"
-                f"4. 中文撰写，技术术语保留英文\n\n"
+                f"4. 中文撰写，技术术语保留英文\n"
+                f"5. 充分利用 Agent 的结构化分析（评分、优劣势、最佳场景），结合 GitHub 指标数据\n\n"
                 f"## YAML Front Matter 格式\n"
                 f"```yaml\n"
                 f"---\n"
@@ -310,22 +367,7 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
                 f"---\n"
                 f"```\n\n"
                 f"## GitHub 指标数据\n{_format_metrics(state.github_metrics)}\n\n"
-                f"## Agent 分析\n{_format_discussion_insights(state.discussion)}\n\n"
-                f"## Discussion 结果\n"
-                f"收敛: {state.discussion.converged if state.discussion else 'N/A'}\n"
-                f"轮数: {state.discussion.rounds_completed if state.discussion else 'N/A'}\n\n"
-                f"最终立场：\n"
-                + (
-                    "\n".join(
-                        f"- {name}: {pos.project_name} 评分 {pos.score}/10 — {pos.recommendation}\n"
-                        f"  优势: {', '.join(pos.strengths)}\n"
-                        f"  劣势: {', '.join(pos.weaknesses)}\n"
-                        f"  最佳场景: {pos.best_for}"
-                        for name, pos in (state.discussion.final_positions or {}).items()
-                    )
-                    if state.discussion and state.discussion.final_positions
-                    else "无讨论结果"
-                )
+                f"## Agent 分析（结构化立场 + 定性分析）\n{_format_discussion_insights(state.discussion)}\n"
             ),
             output_key="report",
             stream_callback=_stream_print,

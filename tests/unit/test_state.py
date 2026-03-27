@@ -170,6 +170,28 @@ class TestSetOutputCoercion:
         assert isinstance(s.config, dict)
         assert s.config["k"] == "v"
 
+    def test_json_with_markdown_fence(self) -> None:
+        """带 markdown code fences 的 JSON 也能正确转换。"""
+        class MyState(State):
+            competitors: list[dict] = []
+
+        s = MyState()
+        raw = '```json\n[{"name": "a", "url": "u"}]\n```'
+        s._set_output("competitors", raw)
+        assert isinstance(s.competitors, list)
+        assert s.competitors[0]["name"] == "a"
+
+    def test_json_with_markdown_fence_no_lang(self) -> None:
+        """无语言标记的 markdown fences 也能正确转换。"""
+        class MyState(State):
+            items: list[dict] = []
+
+        s = MyState()
+        raw = '```\n[{"k": "v"}]\n```'
+        s._set_output("items", raw)
+        assert isinstance(s.items, list)
+        assert s.items[0]["k"] == "v"
+
 
 class TestStateImport:
     def test_import_from_harness(self) -> None:

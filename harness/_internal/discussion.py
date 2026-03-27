@@ -7,7 +7,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -89,6 +89,40 @@ class DiscussionContext:
 def _format_dict(d: dict) -> str:
     """格式化 dict 为可读文本。"""
     return ", ".join(f"{k}: {v}" for k, v in d.items())
+
+
+# 工具名 → 可读描述函数映射
+_TOOL_FORMATTERS: dict[str, Callable[[dict], str]] = {
+    "mcp_github": lambda inp: f'🔍 {inp.get("owner", "")}/{inp.get("repo", "")} — {inp.get("operation", "info")}',
+    "websearch": lambda inp: f'🌐 {inp.get("query", "")}',
+    "fetch": lambda inp: f'📄 {inp.get("url", "")[:60]}',
+    "mcp_browser": lambda inp: f'🌐 {inp.get("prompt", "")[:50]}',
+    "mcp_server": lambda inp: f'🔧 {inp.get("tool", "")}',
+    "read": lambda inp: f'📖 {inp.get("path", "")}',
+    "bash": lambda inp: f'💻 {inp.get("command", "")[:40]}',
+}
+
+
+def _format_tool_input(tool_name: str, tool_input: dict) -> str:
+    """将工具调用转换为人类可读的简短描述。"""
+    # 尝试用专用格式化器
+    for prefix, formatter in _TOOL_FORMATTERS.items():
+        if tool_name.startswith(prefix):
+            try:
+                return formatter(tool_input)
+            except Exception:
+                pass
+    # 回退：提取 query/search/url/command 等常见参数
+    for key in ("query", "search", "url", "command", "owner", "repo", "path", "prompt"):
+        if key in tool_input and tool_input[key]:
+            val = str(tool_input[key])
+            if key in ("url", "path"):
+                val = val[:60]
+            else:
+                val = val[:40]
+            return f"[{key}={val}]"
+    # 完全没有可读参数时
+    return ""
 
 
 def _default_prompt_template(agent: "Agent", ctx: DiscussionContext) -> str:
@@ -276,6 +310,32 @@ async def _execute_agent_turn(
 
         effective_stream_cb = _auto_stream_cb
 
+    # 监听 raw stream 中的工具调用：当有 progress_callback 时，过滤 tool 事件并展示
+    raw_stream_cb: Callable[[dict], None] | None = None
+    if discussion.progress_callback is not None:
+        _pcb2 = discussion.progress_callback
+        _agent_name2 = agent.name
+
+        def _tool_cb(event: dict) -> None:
+            # 只处理 tool 事件，其他忽略（避免 event 洪水）
+            tool_event = event.get("event", {})
+            if tool_event.get("type") != "tool":
+                return
+            tool_name = tool_event.get("name", "?")
+            tool_input = tool_event.get("input", {})
+            # 提取关键参数，生成可读描述
+            input_preview = _format_tool_input(tool_name, tool_input)
+            _pcb2(
+                DiscussionProgressEvent(
+                    event="tool",
+                    round=round_num,
+                    agent_name=_agent_name2,
+                    content=f"{tool_name} {input_preview}".strip(),
+                )
+            )
+
+        raw_stream_cb = _tool_cb
+
     while attempt <= config.max_retries:
         # 进度回调：发言开始
         if discussion.progress_callback:
@@ -301,6 +361,7 @@ async def _execute_agent_turn(
                     session_id=agent_sessions[agent.name],
                     output_schema_json=None,
                     stream_callback=effective_stream_cb,
+                    raw_stream_callback=raw_stream_cb,
                 ),
                 timeout=config.timeout,
             )
