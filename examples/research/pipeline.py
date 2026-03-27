@@ -29,6 +29,18 @@ from .tasks.parse_input import parse_input
 SECONDBRAIN_DIR = Path.home() / "ai" / "SecondBrain"
 
 
+def _stream_print(text: str) -> None:
+    """LLMTask 流式输出回调。"""
+    print(text, end="", flush=True)
+
+
+def _step_banner(label: str) -> None:
+    """打印步骤分隔栏。"""
+    print(f"\n{'─' * 50}")
+    print(f"  ▶ {label}")
+    print(f"{'─' * 50}\n")
+
+
 def _progress_handler(e) -> None:
     """Discussion 进度回调。"""
     if e.event == "streaming":
@@ -94,14 +106,33 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
     state = ResearchState()
     today = date.today().isoformat()
 
+    def _parse_with_banner(state: ResearchState) -> str:
+        _step_banner("Step 0: 解析输入")
+        result = parse_input(state)
+        print(f"  类型: {state.input_type} | 目标: {state.target_project or state.raw_input}")
+        if state.competitors:
+            print(f"  对比: {', '.join(c.get('name', '?') for c in state.competitors if isinstance(c, dict))}")
+        return result
+
+    def _collect_with_banner(state: ResearchState) -> str:
+        _step_banner("Step 2a: 采集 GitHub 数据")
+        result = collect_github(state)
+        for name, data in state.github_metrics.items():
+            if isinstance(data, dict) and "error" not in data:
+                print(f"  {name}: ⭐{data.get('stars', '?')} | 🍴{data.get('forks', '?')}")
+            else:
+                print(f"  {name}: 获取失败")
+        return result
+
     steps = [
-        # Step 0: 解析输入（parse_input 通过 state mutation 设置字段，不使用 output_key）
-        FunctionTask(fn=parse_input),
+        # Step 0: 解析输入
+        FunctionTask(fn=_parse_with_banner),
 
         # Step 1: 发现竞品（仅 topic/project 模式需要）
         Condition(
             check=lambda state: state.input_type in ("topic", "project") and not state.competitors,
             if_true=[
+                FunctionTask(fn=lambda state: _step_banner("Step 1: 搜索同类项目") or ""),
                 LLMTask(
                     prompt=lambda state: (
                         f"我需要调研{'主题: ' + state.raw_input if state.input_type == 'topic' else '项目: ' + state.target_project}。\n\n"
@@ -115,6 +146,7 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
                         f"只输出 JSON，不要其他文字。"
                     ),
                     output_key="competitors",
+                    stream_callback=_stream_print,
                 ),
                 FunctionTask(fn=_parse_competitors_json),
             ],
@@ -123,7 +155,7 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
         # Step 2: 并行采集数据
         Parallel([
             # 2.0: GitHub 定量指标
-            FunctionTask(fn=collect_github),  # mutates state.github_metrics directly
+            FunctionTask(fn=_collect_with_banner),  # mutates state.github_metrics
             # 2.1: 定性信息（由 Claude 搜索和分析）
             LLMTask(
                 prompt=lambda state: (
@@ -139,10 +171,12 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
                     f"请详细输出每个项目的分析。"
                 ),
                 output_key="qualitative_info",
+                stream_callback=_stream_print,
             ),
         ]),
 
         # Step 3: 三 Agent 结构化讨论
+        FunctionTask(fn=lambda state: _step_banner("Step 3: 多 Agent 讨论") or ""),
         Discussion(
             agents=[tech_analyst, community_assessor, architect],
             position_schema=ProjectEvaluation,
@@ -159,6 +193,7 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
         ),
 
         # Step 4: 生成最终报告
+        FunctionTask(fn=lambda state: _step_banner("Step 4: 生成报告") or ""),
         LLMTask(
             prompt=lambda state: (
                 f"基于以下调研数据和多 Agent 讨论结果，生成一份完整的 Markdown 调研报告。\n\n"
@@ -197,6 +232,7 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
                 )
             ),
             output_key="report",
+            stream_callback=_stream_print,
         ),
 
         # Step 5: 保存到 SecondBrain
