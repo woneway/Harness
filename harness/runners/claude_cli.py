@@ -43,13 +43,18 @@ class ClaudeCliRunner(AbstractRunner):
 
     Args:
         permission_mode: Claude Code 权限模式，默认 BYPASS（无人值守自动化）。
+        disable_mcp: 禁用子进程的 MCP server 连接。默认 True，
+            防止继承父进程（如 Claude Code 交互 session）的 MCP 配置
+            导致子进程因 MCP server 不可达而挂起。
     """
 
     def __init__(
         self,
         permission_mode: PermissionMode = PermissionMode.BYPASS,
+        disable_mcp: bool = True,
     ) -> None:
         self.permission_mode = permission_mode
+        self.disable_mcp = disable_mcp
         self._claude_path: str | None = None
         self._checked = False
 
@@ -135,6 +140,11 @@ class ClaudeCliRunner(AbstractRunner):
             "stream-json",
             "--include-partial-messages",
         ]
+
+        if self.disable_mcp:
+            # 使用 --strict-mcp-config 覆盖所有 MCP 配置（~/.claude.json 等），
+            # 防止子进程继承父进程的 MCP server 连接导致挂起。
+            args += ["--strict-mcp-config"]
 
         if system_prompt:
             args += ["--system-prompt", system_prompt]

@@ -20,6 +20,16 @@ class TestPermissionMode:
         assert PermissionMode.PLAN == "plan"
 
 
+class TestDisableMcp:
+    def test_default_disable_mcp(self) -> None:
+        runner = ClaudeCliRunner()
+        assert runner.disable_mcp is True
+
+    def test_explicit_disable_mcp_false(self) -> None:
+        runner = ClaudeCliRunner(disable_mcp=False)
+        assert runner.disable_mcp is False
+
+
 class TestGetSubprocessEnv:
     def test_removes_claude_vars(self) -> None:
         runner = ClaudeCliRunner()
@@ -137,6 +147,64 @@ class TestExecute:
 
         assert result.text == "hello world"
         assert result.session_id == "sess-1"
+
+    @pytest.mark.asyncio
+    async def test_strict_mcp_config_flag(self) -> None:
+        """disable_mcp=True（默认）时添加 --strict-mcp-config。"""
+        runner = ClaudeCliRunner()
+        runner._checked = True
+        runner._claude_path = "/usr/bin/claude"
+
+        captured_args = []
+
+        async def mock_create(*args, **kwargs):
+            captured_args.extend(args)
+            mock_stdout = AsyncMock()
+            mock_stdout.__aiter__ = lambda self: self
+            mock_stdout.__anext__ = AsyncMock(side_effect=StopAsyncIteration())
+            mock_stderr = AsyncMock()
+            mock_stderr.read = AsyncMock(return_value=b"")
+            proc = AsyncMock()
+            proc.stdout = mock_stdout
+            proc.stderr = mock_stderr
+            proc.wait = AsyncMock(return_value=0)
+            proc.returncode = 0
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=mock_create), \
+             patch.object(runner, "_get_subprocess_env", return_value={}):
+            await runner.execute("prompt", system_prompt="", session_id=None)
+
+        assert "--strict-mcp-config" in captured_args
+
+    @pytest.mark.asyncio
+    async def test_no_strict_mcp_config_when_disabled(self) -> None:
+        """disable_mcp=False 时不添加 --strict-mcp-config。"""
+        runner = ClaudeCliRunner(disable_mcp=False)
+        runner._checked = True
+        runner._claude_path = "/usr/bin/claude"
+
+        captured_args = []
+
+        async def mock_create(*args, **kwargs):
+            captured_args.extend(args)
+            mock_stdout = AsyncMock()
+            mock_stdout.__aiter__ = lambda self: self
+            mock_stdout.__anext__ = AsyncMock(side_effect=StopAsyncIteration())
+            mock_stderr = AsyncMock()
+            mock_stderr.read = AsyncMock(return_value=b"")
+            proc = AsyncMock()
+            proc.stdout = mock_stdout
+            proc.stderr = mock_stderr
+            proc.wait = AsyncMock(return_value=0)
+            proc.returncode = 0
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=mock_create), \
+             patch.object(runner, "_get_subprocess_env", return_value={}):
+            await runner.execute("prompt", system_prompt="", session_id=None)
+
+        assert "--strict-mcp-config" not in captured_args
 
     @pytest.mark.asyncio
     async def test_session_id_passed_as_resume(self) -> None:
