@@ -122,6 +122,53 @@ class TestShellTaskWithState:
         assert "hello" in r.output
 
 
+class TestAsyncFunctionTask:
+    """async FunctionTask 支持测试（Issue #7）。"""
+
+    @pytest.mark.asyncio
+    async def test_async_fn_v2(self) -> None:
+        """async def fn(state) 返回值被正确 await。"""
+        s = State()
+        s._set_output("val", 10)
+
+        async def fn(state: State):
+            return state.val * 2  # type: ignore[attr-defined]
+
+        task = FunctionTask(fn=fn)
+        r = await execute_function_task(
+            task, "0", s._results, "run1",
+            harness_config=TaskConfig(max_retries=0),
+            state=s,
+        )
+        assert r.success
+        assert r.output == 20
+
+    @pytest.mark.asyncio
+    async def test_async_fn_v1(self) -> None:
+        """async def fn(results) 在无 state 时也能正确 await。"""
+        async def fn(results):
+            return f"count={len(results)}"
+
+        task = FunctionTask(fn=fn)
+        r = await execute_function_task(
+            task, "0", [], "run1",
+            harness_config=TaskConfig(max_retries=0),
+        )
+        assert r.success
+        assert r.output == "count=0"
+
+    @pytest.mark.asyncio
+    async def test_sync_fn_still_works(self) -> None:
+        """同步函数不受影响。"""
+        task = FunctionTask(fn=lambda results: 42)
+        r = await execute_function_task(
+            task, "0", [], "run1",
+            harness_config=TaskConfig(max_retries=0),
+        )
+        assert r.success
+        assert r.output == 42
+
+
 class TestOutputKey:
     def test_output_key_on_llm_task(self) -> None:
         from harness.tasks import LLMTask

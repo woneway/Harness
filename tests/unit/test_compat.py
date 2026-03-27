@@ -103,3 +103,36 @@ class TestCallWithCompat:
         s._append_result(_make_result())
         result = call_with_compat(lambda results: type(results).__name__, s)
         assert result == "list"
+
+    def test_v1_warns_in_state_pipeline(self, caplog: pytest.LogCaptureFixture) -> None:
+        """in_state_pipeline=True 且检测为 v1 模式时输出 warning。"""
+        import logging
+
+        s = State()
+        s._append_result(_make_result())
+        with caplog.at_level(logging.WARNING, logger="harness._internal.compat"):
+            call_with_compat(lambda s: len(s), s, in_state_pipeline=True)
+        assert "v1 模式" in caplog.text
+
+    def test_v2_no_warn_in_state_pipeline(self, caplog: pytest.LogCaptureFixture) -> None:
+        """v2 模式不应输出 warning。"""
+        import logging
+
+        s = State()
+        s._set_output("x", 1)
+
+        def fn(state: State):
+            return state.x  # type: ignore[attr-defined]
+
+        with caplog.at_level(logging.WARNING, logger="harness._internal.compat"):
+            call_with_compat(fn, s, in_state_pipeline=True)
+        assert "v1 模式" not in caplog.text
+
+    def test_v1_no_warn_without_flag(self, caplog: pytest.LogCaptureFixture) -> None:
+        """in_state_pipeline=False（默认）不输出 warning。"""
+        import logging
+
+        s = State()
+        with caplog.at_level(logging.WARNING, logger="harness._internal.compat"):
+            call_with_compat(lambda r: r, s)
+        assert "v1 模式" not in caplog.text

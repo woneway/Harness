@@ -442,6 +442,14 @@ async def execute_discussion(
     converged = False
     convergence_round: int | None = None
 
+    # 解析 topic
+    resolved_topic = ""
+    if discussion.topic:
+        if callable(discussion.topic):
+            resolved_topic = discussion.topic(state) if state is not None else ""
+        else:
+            resolved_topic = discussion.topic
+
     # 解析 background
     resolved_bg = ""
     if discussion.background:
@@ -459,7 +467,7 @@ async def execute_discussion(
             ctx = DiscussionContext(
                 round=round_num,
                 agent_name=agent.name,
-                topic=discussion.topic,
+                topic=resolved_topic,
                 background=resolved_bg,
                 state=state,
                 history=list(history),
@@ -488,7 +496,7 @@ async def execute_discussion(
                 updated_ctx = DiscussionContext(
                     round=round_num,
                     agent_name=agent.name,
-                    topic=discussion.topic,
+                    topic=resolved_topic,
                     background=resolved_bg,
                     state=state,
                     history=list(history),

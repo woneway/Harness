@@ -537,3 +537,72 @@ class TestHarnessDialogue:
         ])
         assert len(received) == 1
         assert isinstance(received[0], DialogueOutput)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline 生命周期回调（Issue #9）
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineLifecycleCallbacks:
+    @pytest.mark.asyncio
+    async def test_on_step_start_called(self, tmp_path: Path) -> None:
+        """on_step_start 在每步执行前被调用。"""
+        h = make_harness(tmp_path)
+        events: list[tuple[str, str]] = []
+
+        def on_start(step, task_index):
+            events.append((type(step).__name__, task_index))
+
+        await h.pipeline(
+            [
+                FunctionTask(fn=lambda r: "a"),
+                FunctionTask(fn=lambda r: "b"),
+            ],
+            on_step_start=on_start,
+        )
+        assert len(events) == 2
+        assert events[0] == ("FunctionTask", "0")
+        assert events[1] == ("FunctionTask", "1")
+
+    @pytest.mark.asyncio
+    async def test_on_step_complete_called(self, tmp_path: Path) -> None:
+        """on_step_complete 在每步完成后被调用。"""
+        h = make_harness(tmp_path)
+        events: list[tuple[str, str, Any]] = []
+
+        def on_complete(step, task_index, result):
+            events.append((type(step).__name__, task_index, result.output))
+
+        await h.pipeline(
+            [
+                FunctionTask(fn=lambda r: "hello"),
+                FunctionTask(fn=lambda r: "world"),
+            ],
+            on_step_complete=on_complete,
+        )
+        assert len(events) == 2
+        assert events[0] == ("FunctionTask", "0", "hello")
+        assert events[1] == ("FunctionTask", "1", "world")
+
+    @pytest.mark.asyncio
+    async def test_callback_exception_does_not_break_pipeline(self, tmp_path: Path) -> None:
+        """回调抛异常不影响 pipeline 执行。"""
+        h = make_harness(tmp_path)
+
+        def bad_callback(step, task_index):
+            raise RuntimeError("callback error")
+
+        pr = await h.pipeline(
+            [FunctionTask(fn=lambda r: "ok")],
+            on_step_start=bad_callback,
+        )
+        assert len(pr.results) == 1
+        assert pr.results[0].output == "ok"
+
+    @pytest.mark.asyncio
+    async def test_no_callbacks_by_default(self, tmp_path: Path) -> None:
+        """不传回调时 pipeline 正常工作。"""
+        h = make_harness(tmp_path)
+        pr = await h.pipeline([FunctionTask(fn=lambda r: "ok")])
+        assert pr.results[0].output == "ok"

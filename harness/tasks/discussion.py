@@ -86,7 +86,7 @@ class Discussion(BaseTask):
     agents: list["Agent"] = field(default_factory=list)
     position_schema: type["BaseModel"] | None = None  # 必填
 
-    topic: str = ""
+    topic: str | Callable[["State"], str] = ""
     background: str | Callable[["State"], str] = ""
     max_rounds: int = 5
 
