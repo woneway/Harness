@@ -12,9 +12,9 @@ from harness.runners.base import AbstractRunner, RunnerResult
 from tests.conftest import make_mock_storage, patch_storage
 
 from examples.research.pipeline import (
-    _parse_competitors_json,
+    _format_full_discussion,
+    _sanitize_filename,
     _save_report,
-    _strip_markdown_fences,
     build_pipeline,
 )
 from examples.research.schemas.position import ProjectEvaluation
@@ -25,22 +25,16 @@ from examples.research.tasks.parse_input import parse_input
 
 # ── Mock Runner ───────────────────────────────────────────────────────────
 
-_MOCK_COMPETITORS_JSON = json.dumps([
-    {"name": "edict", "url": "https://github.com/org/edict", "description": "Target project"},
-    {"name": "project-a", "url": "https://github.com/org/project-a", "description": "A tool"},
-    {"name": "project-b", "url": "https://github.com/org/project-b", "description": "B tool"},
-])
-
 _MOCK_POSITION = json.dumps({
     "project_name": "edict",
     "score": 8.0,
     "strengths": ["good API", "fast"],
     "weaknesses": ["docs lacking"],
+    "risks": ["single maintainer"],
     "best_for": "small projects",
     "recommendation": "推荐",
 })
 
-_MOCK_QUALITATIVE = "项目A技术架构优秀，社区活跃。项目B文档详尽。"
 _MOCK_REPORT = "---\ntitle: test\n---\n# Report\nSome content."
 
 
@@ -68,28 +62,23 @@ class _ResearchMockRunner(AbstractRunner):
             self._phase2_count += 1
             return RunnerResult(text=_MOCK_POSITION, tokens_used=5, session_id=None)
 
-        # Discussion Phase 1: free text (has agent system_prompt)
+        # Discussion Phase 1: free text (agent system_prompt 包含角色关键词)
         if system_prompt and any(
-            kw in system_prompt for kw in ("技术分析", "社区评估", "架构师", "技术架构", "社区生态", "选型")
+            kw in system_prompt for kw in (
+                "技术深潜", "生态观察", "魔鬼代言", "选型顾问",
+                "源码", "社区", "挑战", "综合",
+            )
         ):
             self._phase1_count += 1
             return RunnerResult(
-                text=f"Agent analysis round {self._phase1_count}",
+                text=f"Agent analysis round {self._phase1_count}: 经过调研发现项目质量良好。",
                 tokens_used=10,
                 session_id=f"disc-{self._phase1_count}",
             )
 
-        # Regular LLMTask
+        # Regular LLMTask (recorder report)
         self._llm_count += 1
-        if "竞品" in prompt or "搜索" in prompt or "JSON" in prompt:
-            return RunnerResult(
-                text=_MOCK_COMPETITORS_JSON, tokens_used=15, session_id=f"llm-{self._llm_count}"
-            )
-        if "定性调研" in prompt:
-            return RunnerResult(
-                text=_MOCK_QUALITATIVE, tokens_used=15, session_id=f"llm-{self._llm_count}"
-            )
-        if "报告" in prompt:
+        if "报告" in prompt or "记录员" in prompt:
             return RunnerResult(
                 text=_MOCK_REPORT, tokens_used=20, session_id=f"llm-{self._llm_count}"
             )
@@ -151,45 +140,28 @@ class TestExtractOwnerRepo:
         assert _extract_owner_repo("x", "not a url at all") is None
 
 
-# ── _parse_competitors_json 单元测试 ─────────────────────────────────────
+# ── _sanitize_filename 单元测试 ───────────────────────────────────────────
 
 
-def _set_competitors_raw(state: ResearchState, raw: str) -> None:
-    """模拟 _set_output 绕过 Pydantic 校验直接写入字符串。"""
-    state.__dict__["competitors"] = raw
+class TestSanitizeFilename:
+    def test_simple_name(self):
+        assert _sanitize_filename("crewai") == "crewai"
 
+    def test_chinese_name(self):
+        result = _sanitize_filename("技术深潜员")
+        assert result == "技术深潜员"
 
-class TestParseCompetitorsJson:
-    def test_backfill_target_url(self):
-        state = ResearchState(target_project="edict")
-        _set_competitors_raw(state, json.dumps([
-            {"name": "edict", "url": "https://github.com/org/edict", "description": "..."},
-            {"name": "other", "url": "https://github.com/org/other", "description": "..."},
-        ]))
-        _parse_competitors_json(state)
-        assert state.target_url == "https://github.com/org/edict"
-        assert len(state.competitors) == 2
+    def test_special_chars(self):
+        result = _sanitize_filename("foo/bar@baz")
+        assert "/" not in result
+        assert "@" not in result
 
-    def test_markdown_fences(self):
-        state = ResearchState(target_project="foo")
-        _set_competitors_raw(
-            state, '```json\n[{"name": "foo", "url": "org/foo", "description": "x"}]\n```'
-        )
-        _parse_competitors_json(state)
-        assert len(state.competitors) == 1
-        assert state.target_url == "org/foo"
+    def test_spaces(self):
+        result = _sanitize_filename("hello world")
+        assert result == "hello-world"
 
-    def test_invalid_json(self):
-        state = ResearchState(target_project="x")
-        _set_competitors_raw(state, "not json")
-        _parse_competitors_json(state)
-        assert state.competitors == []
-
-    def test_already_list(self):
-        comps = [{"name": "a", "url": "org/a", "description": ""}]
-        state = ResearchState(target_project="b", competitors=comps)
-        _parse_competitors_json(state)
-        assert state.competitors == comps
+    def test_empty(self):
+        assert _sanitize_filename("") == "unknown"
 
 
 # ── _save_report 文件名测试 ──────────────────────────────────────────────
@@ -197,14 +169,14 @@ class TestParseCompetitorsJson:
 
 class TestSaveReport:
     def test_project_filename(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("examples.research.pipeline.SECONDBRAIN_DIR", tmp_path)
+        monkeypatch.setattr("examples.research.pipeline.REPORT_DIR", tmp_path)
         state = ResearchState(target_project="crewai", report="# Report")
         path = _save_report(state)
         assert "crewai-research.md" in path
         assert (tmp_path / "crewai-research.md").exists()
 
     def test_topic_filename(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("examples.research.pipeline.SECONDBRAIN_DIR", tmp_path)
+        monkeypatch.setattr("examples.research.pipeline.REPORT_DIR", tmp_path)
         state = ResearchState(
             target_project="",
             raw_input="Python AI 编排框架",
@@ -212,21 +184,57 @@ class TestSaveReport:
         )
         path = _save_report(state)
         assert "research.md" in path
-        # 不应该是 "research-research.md" 或空文件名
         assert "-research.md" in path
         filename = path.split("/")[-1]
         assert not filename.startswith("-")
 
 
+# ── _format_full_discussion 测试 ─────────────────────────────────────────
+
+
+class TestFormatFullDiscussion:
+    def test_none_discussion(self):
+        assert _format_full_discussion(None) == "无讨论数据"
+
+    def test_formats_all_turns(self):
+        """验证所有轮次的完整文本都被包含（不截断）。"""
+        from harness.tasks.discussion import DiscussionOutput, DiscussionTurn
+
+        long_text = "A" * 2000  # 远超旧的 600 字限制
+        turns = [
+            DiscussionTurn(
+                round=0,
+                agent_name="技术深潜员",
+                response=long_text,
+                position=ProjectEvaluation(
+                    project_name="test",
+                    score=8.0,
+                    strengths=["good"],
+                    weaknesses=["bad"],
+                    risks=["risky"],
+                    best_for="small teams",
+                    recommendation="推荐",
+                ),
+                position_changed=False,
+            ),
+        ]
+        output = DiscussionOutput(
+            turns=turns,
+            rounds_completed=1,
+            total_turns=1,
+            final_positions={"技术深潜员": turns[0].position},
+            converged=False,
+            convergence_round=None,
+            position_history={"技术深潜员": [turns[0].position]},
+        )
+        result = _format_full_discussion(output)
+        # 完整文本必须被包含
+        assert long_text in result
+        assert "技术深潜员" in result
+        assert "8.0" in result or "8" in result
+
+
 # ── Pipeline 集成测试 ─────────────────────────────────────────────────────
-
-
-def _mock_collect_github(state):
-    """Mock collect_github: 不调用 gh CLI。"""
-    state.github_metrics = {
-        "edict": {"stars": 100, "forks": 10, "language": "Python", "license": "MIT"},
-    }
-    return json.dumps(state.github_metrics)
 
 
 @pytest.mark.asyncio
@@ -240,9 +248,9 @@ async def test_pipeline_project_mode(tmp_path):
     h = Harness(project_path=str(tmp_path), runner=runner)
     patch_storage(h, make_mock_storage())
 
-    # Mock collect_github 和 _save_report
     with patch(
-        "examples.research.pipeline.collect_github", _mock_collect_github
+        "examples.research.pipeline._save_discussion_diaries",
+        lambda state: str(tmp_path / "diaries"),
     ), patch(
         "examples.research.pipeline._save_report",
         lambda state: str(tmp_path / "test-report.md"),
@@ -267,7 +275,7 @@ async def test_pipeline_project_mode(tmp_path):
 
 @pytest.mark.asyncio
 async def test_pipeline_comparison_mode(tmp_path):
-    """测试 comparison 模式（跳过 discover 步骤）。"""
+    """测试 comparison 模式（agents 收到对比项目列表）。"""
     runner = _ResearchMockRunner()
     steps, state = build_pipeline(runner)
 
@@ -277,7 +285,8 @@ async def test_pipeline_comparison_mode(tmp_path):
     patch_storage(h, make_mock_storage())
 
     with patch(
-        "examples.research.pipeline.collect_github", _mock_collect_github
+        "examples.research.pipeline._save_discussion_diaries",
+        lambda state: str(tmp_path / "diaries"),
     ), patch(
         "examples.research.pipeline._save_report",
         lambda state: str(tmp_path / "test-report.md"),

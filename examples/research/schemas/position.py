@@ -8,7 +8,8 @@ class ProjectEvaluation(BaseModel):
 
     project_name: str           # 被评估的项目名
     score: float                # 0-10 综合评分
-    strengths: list[str]        # 优势（最多 3 条）
-    weaknesses: list[str]       # 劣势（最多 3 条）
+    strengths: list[str]        # 优势（附证据，最多 3 条）
+    weaknesses: list[str]       # 劣势（附证据，最多 3 条）
+    risks: list[str]            # 风险项（最多 3 条）
     best_for: str               # 最适合的场景（一句话）
-    recommendation: str         # "推荐" | "可选" | "不推荐"
+    recommendation: str         # "强烈推荐" | "推荐" | "可选" | "谨慎" | "不推荐"

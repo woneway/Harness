@@ -13,10 +13,7 @@ class ResearchState(State):
     # 调研目标
     target_project: str = ""               # 主调研项目名
     target_url: str = ""                   # 主项目 GitHub URL
-    competitors: list[dict] = []           # [{name, url, description}]
-
-    # 采集数据
-    github_metrics: dict = {}              # {project_name: {stars, forks, ...}}
+    competitors: list[dict] = []           # parse_input comparison 模式解析出的对比项目
 
     # Discussion 结果
     discussion: DiscussionOutput | None = None
