@@ -13,7 +13,7 @@ import sys
 import time
 
 from harness import Harness, Result
-from harness.runners.claude_cli import ClaudeCliRunner, PermissionMode
+from harness.runners.claude_cli import ClaudeCliRunner, MCPMode, PermissionMode
 from harness.tasks import PipelineStep
 
 from .pipeline import build_pipeline
@@ -75,7 +75,10 @@ async def main() -> None:
     print(f"调研目标: {raw_input}")
     print("=" * 60)
 
-    runner = ClaudeCliRunner(permission_mode=PermissionMode.BYPASS)
+    runner = ClaudeCliRunner(
+        permission_mode=PermissionMode.BYPASS,
+        mcp_mode=MCPMode.INHERIT,
+    )
     steps, state = build_pipeline(runner)
 
     # 注入用户输入

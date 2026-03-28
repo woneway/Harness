@@ -38,23 +38,35 @@ class PermissionMode(StrEnum):
     PLAN = "plan"
 
 
+class MCPMode(StrEnum):
+    """Claude CLI 子进程的 MCP 加载模式。"""
+
+    DISABLE = "disable"  # 禁用所有 MCP，加载 --strict-mcp-config
+    INHERIT = "inherit"  # 不加任何 MCP 参数，允许继承父进程配置
+    SPECIFY = "specify"  # --strict-mcp-config + --mcp-config 指定配置文件
+
+
 class ClaudeCliRunner(AbstractRunner):
     """通过 asyncio 子进程调用 Claude Code CLI。
 
     Args:
         permission_mode: Claude Code 权限模式，默认 BYPASS（无人值守自动化）。
-        disable_mcp: 禁用子进程的 MCP server 连接。默认 True，
-            防止继承父进程（如 Claude Code 交互 session）的 MCP 配置
-            导致子进程因 MCP server 不可达而挂起。
+        mcp_mode: MCP 加载模式。
+            - DISABLE（默认）：禁用所有 MCP，加载 --strict-mcp-config
+            - INHERIT：不加任何 MCP 参数，允许继承父进程配置
+            - SPECIFY：严格模式，只加载 mcp_configs 指定的配置文件
+        mcp_configs: 当 mcp_mode 为 SPECIFY 时，指定要加载的 MCP 配置文件路径。
     """
 
     def __init__(
         self,
         permission_mode: PermissionMode = PermissionMode.BYPASS,
-        disable_mcp: bool = True,
+        mcp_mode: MCPMode = MCPMode.DISABLE,
+        mcp_configs: list[str] | None = None,
     ) -> None:
         self.permission_mode = permission_mode
-        self.disable_mcp = disable_mcp
+        self.mcp_mode = mcp_mode
+        self.mcp_configs = mcp_configs
         self._claude_path: str | None = None
         self._checked = False
 
@@ -141,10 +153,18 @@ class ClaudeCliRunner(AbstractRunner):
             "--include-partial-messages",
         ]
 
-        if self.disable_mcp:
+        if self.mcp_mode == MCPMode.DISABLE:
             # 使用 --strict-mcp-config 覆盖所有 MCP 配置（~/.claude.json 等），
             # 防止子进程继承父进程的 MCP server 连接导致挂起。
             args += ["--strict-mcp-config"]
+        elif self.mcp_mode == MCPMode.SPECIFY:
+            # 严格模式：只加载指定的 MCP 配置，禁用所有继承的配置。
+            if not self.mcp_configs:
+                raise ValueError("mcp_mode=SPECIFY requires mcp_configs to be set")
+            args += ["--strict-mcp-config"]
+            for config in self.mcp_configs:
+                args += ["--mcp-config", config]
+        # MCPMode.INHERIT: 不加任何 MCP 参数，允许继承父进程配置
 
         if system_prompt:
             args += ["--system-prompt", system_prompt]

@@ -16,8 +16,8 @@
         AnthropicRunner,
     )
 
-    # PermissionMode 需从 harness.runners.claude_cli 单独导入
-    from harness.runners.claude_cli import PermissionMode
+    # PermissionMode, MCPMode 需从 harness.runners.claude_cli 单独导入
+    from harness.runners.claude_cli import PermissionMode, MCPMode
 """
 
 from harness.agent import Agent

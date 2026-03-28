@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from harness._internal.exceptions import ClaudeNotFoundError
-from harness.runners.claude_cli import ClaudeCliRunner, PermissionMode, _ENV_VARS_TO_REMOVE
+from harness.runners.claude_cli import ClaudeCliRunner, MCPMode, PermissionMode, _ENV_VARS_TO_REMOVE
 
 
 class TestPermissionMode:
@@ -20,14 +20,19 @@ class TestPermissionMode:
         assert PermissionMode.PLAN == "plan"
 
 
-class TestDisableMcp:
-    def test_default_disable_mcp(self) -> None:
+class TestMCPMode:
+    def test_mcp_mode_default(self) -> None:
         runner = ClaudeCliRunner()
-        assert runner.disable_mcp is True
+        assert runner.mcp_mode == MCPMode.DISABLE
 
-    def test_explicit_disable_mcp_false(self) -> None:
-        runner = ClaudeCliRunner(disable_mcp=False)
-        assert runner.disable_mcp is False
+    def test_mcp_mode_explicit_inherit(self) -> None:
+        runner = ClaudeCliRunner(mcp_mode=MCPMode.INHERIT)
+        assert runner.mcp_mode == MCPMode.INHERIT
+
+    def test_mcp_mode_specify(self) -> None:
+        runner = ClaudeCliRunner(mcp_mode=MCPMode.SPECIFY, mcp_configs=["/path/to/config.json"])
+        assert runner.mcp_mode == MCPMode.SPECIFY
+        assert runner.mcp_configs == ["/path/to/config.json"]
 
 
 class TestGetSubprocessEnv:
@@ -150,7 +155,7 @@ class TestExecute:
 
     @pytest.mark.asyncio
     async def test_strict_mcp_config_flag(self) -> None:
-        """disable_mcp=True（默认）时添加 --strict-mcp-config。"""
+        """mcp_mode=DISABLE（默认）时添加 --strict-mcp-config。"""
         runner = ClaudeCliRunner()
         runner._checked = True
         runner._claude_path = "/usr/bin/claude"
@@ -178,9 +183,9 @@ class TestExecute:
         assert "--strict-mcp-config" in captured_args
 
     @pytest.mark.asyncio
-    async def test_no_strict_mcp_config_when_disabled(self) -> None:
-        """disable_mcp=False 时不添加 --strict-mcp-config。"""
-        runner = ClaudeCliRunner(disable_mcp=False)
+    async def test_inherit_mode_no_strict_mcp_config(self) -> None:
+        """mcp_mode=INHERIT 时不添加 --strict-mcp-config。"""
+        runner = ClaudeCliRunner(mcp_mode=MCPMode.INHERIT)
         runner._checked = True
         runner._claude_path = "/usr/bin/claude"
 
@@ -205,6 +210,51 @@ class TestExecute:
             await runner.execute("prompt", system_prompt="", session_id=None)
 
         assert "--strict-mcp-config" not in captured_args
+
+    @pytest.mark.asyncio
+    async def test_specify_mode_adds_config(self) -> None:
+        """mcp_mode=SPECIFY 时添加 --strict-mcp-config 和 --mcp-config。"""
+        runner = ClaudeCliRunner(mcp_mode=MCPMode.SPECIFY, mcp_configs=["/a.json", "/b.json"])
+        runner._checked = True
+        runner._claude_path = "/usr/bin/claude"
+
+        captured_args = []
+
+        async def mock_create(*args, **kwargs):
+            captured_args.extend(args)
+            mock_stdout = AsyncMock()
+            mock_stdout.__aiter__ = lambda self: self
+            mock_stdout.__anext__ = AsyncMock(side_effect=StopAsyncIteration())
+            mock_stderr = AsyncMock()
+            mock_stderr.read = AsyncMock(return_value=b"")
+            proc = AsyncMock()
+            proc.stdout = mock_stdout
+            proc.stderr = mock_stderr
+            proc.wait = AsyncMock(return_value=0)
+            proc.returncode = 0
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=mock_create), \
+             patch.object(runner, "_get_subprocess_env", return_value={}):
+            await runner.execute("prompt", system_prompt="", session_id=None)
+
+        assert "--strict-mcp-config" in captured_args
+        assert "--mcp-config" in captured_args
+        # 两个配置文件都出现
+        config_indices = [i for i, a in enumerate(captured_args) if a == "--mcp-config"]
+        assert len(config_indices) == 2
+        assert captured_args[config_indices[0] + 1] == "/a.json"
+        assert captured_args[config_indices[1] + 1] == "/b.json"
+
+    @pytest.mark.asyncio
+    async def test_specify_mode_raises_without_configs(self) -> None:
+        """mcp_mode=SPECIFY 但 mcp_configs 为空时抛出 ValueError。"""
+        runner = ClaudeCliRunner(mcp_mode=MCPMode.SPECIFY, mcp_configs=None)
+        runner._checked = True
+        runner._claude_path = "/usr/bin/claude"
+
+        with pytest.raises(ValueError, match="mcp_mode=SPECIFY requires mcp_configs"):
+            await runner.execute("prompt", system_prompt="", session_id=None)
 
     @pytest.mark.asyncio
     async def test_session_id_passed_as_resume(self) -> None:
