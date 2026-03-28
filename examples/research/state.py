@@ -19,5 +19,6 @@ class ResearchState(State):
     discussion: DiscussionOutput | None = None
 
     # 最终报告
-    report: str = ""                       # 最终 Markdown 报告
+    report: str = ""                       # 最终 Markdown 报告（可能是 ReportOutput 解析后的对象）
+    area: str = ""                         # AI 判断的 SecondBrain Areas 子目录
     output_path: str = ""                  # 写入 SecondBrain 的文件路径

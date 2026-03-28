@@ -21,7 +21,7 @@ from harness.runners.base import AbstractRunner
 from harness.tasks.discussion import all_agree_on
 
 from .agents import create_agents
-from .schemas.position import ProjectEvaluation
+from .schemas.position import ProjectEvaluation, ReportOutput
 from .state import ResearchState
 from .tasks.parse_input import parse_input
 
@@ -202,18 +202,33 @@ def _sanitize_filename(name: str) -> str:
 # ── 报告保存 ───────────────────────────────────────────────────────────────
 
 def _save_report(state: ResearchState) -> str:
-    """将最终报告写入 SecondBrain/Knowledge/Areas/Tech/。"""
+    """将最终报告写入 SecondBrain/Knowledge/Areas/{area}/。"""
+    # 兼容：report 可能是 ReportOutput 对象或直接是字符串
+    if hasattr(state.report, "area") and hasattr(state.report, "report"):
+        report_obj = state.report
+        state.area = report_obj.area
+        report_content = report_obj.report
+    else:
+        # 降级：如果不是 ReportOutput，使用 state.area 或默认 Tech
+        area = state.area.strip() if state.area else "Tech"
+        report_content = str(state.report)
+        if not state.area:
+            state.area = area
+
+    if not state.area:
+        state.area = "Tech"
+
     project_name = _sanitize_filename(
         state.target_project or state.raw_input[:40]
     )
     filename = f"{project_name}-research.md"
-    output_path = REPORT_DIR / filename
+    output_path = REPORT_DIR / state.area / filename
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(state.report, encoding="utf-8")
+    output_path.write_text(report_content, encoding="utf-8")
 
     state.output_path = str(output_path)
-    print(f"  报告已保存: {output_path}")
+    print(f"  报告已保存: {output_path} (area={state.area})")
     return str(output_path)
 
 
@@ -290,6 +305,13 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
                 f"「{state.target_project or state.raw_input}」的完整讨论记录。\n\n"
                 f"请基于讨论中的所有发现、论据、数据和分歧，"
                 f"写出一份最详尽的 Markdown 调研报告。\n\n"
+                f"## 你的任务\n"
+                f"1. 判断这个项目/主题属于 SecondBrain 的哪个 Areas 目录，"
+                f"从以下常见分类中选择最合适的一个：\n"
+                f"   Tech（技术/开发）、Life（生活）、Finance（金融）、"
+                f"Health（健康）、Learning（学习）、Entertainment（娱乐）、"
+                f"Business（商业）、Other（其他）\n"
+                f"2. 撰写完整的 Markdown 调研报告\n\n"
                 f"## 报告要求\n"
                 f"1. **保留所有有价值信息**：专家查到的数据、代码证据、案例都要写进报告\n"
                 f"2. **忠实呈现分歧**：如果专家意见不一致，双方论据都要呈现\n"
@@ -317,6 +339,7 @@ def build_pipeline(runner: AbstractRunner) -> tuple[list, ResearchState]:
                 f"```\n\n"
                 f"## 完整讨论记录\n\n{_format_full_discussion(state.discussion)}\n"
             ),
+            output_schema=ReportOutput,
             output_key="report",
             stream_callback=_stream_print,
         ),

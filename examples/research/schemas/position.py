@@ -3,6 +3,13 @@
 from pydantic import BaseModel
 
 
+class ReportOutput(BaseModel):
+    """报告生成的结构化输出。"""
+
+    area: str  # SecondBrain Areas 下的子目录，如 "Tech"、"Life"、"Finance"
+    report: str  # Markdown 报告全文
+
+
 class ProjectEvaluation(BaseModel):
     """Discussion 中每个 Agent 每轮输出的结构化立场。"""
 
