@@ -4,10 +4,10 @@ from pydantic import BaseModel
 
 
 class ReportOutput(BaseModel):
-    """报告生成的结构化输出。"""
+    """报告元数据（从 JSON 行解析），报告正文从 Markdown 部分提取。"""
 
-    area: str  # SecondBrain Areas 下的子目录，如 "Tech"、"Life"、"Finance"
-    report: str  # Markdown 报告全文
+    area: str  # SecondBrain Areas 下的子目录
+    title: str  # 报告标题（用于文件名）
 
 
 class ProjectEvaluation(BaseModel):
